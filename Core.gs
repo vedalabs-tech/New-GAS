@@ -18,7 +18,7 @@ const DEFAULT_FOLDER_ID = "1jlHfRHBat1ZlO32uRkBYM2Cw03vhgv86";
 
 const OTP_TTL_MS = 10 * 60 * 1000;
 const OTP_MAX_ATTEMPTS = 5;
-const OTP_MAX_REQUESTS_PER_WINDOW = 3;
+const OTP_MAX_REQUESTS_PER_WINDOW = 6;
 const OTP_WINDOW_MS = 15 * 60 * 1000;
 
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -555,7 +555,6 @@ function createSession_(user, device, isAdmin) {
     CreatedAt: now_(),
     Device: device || "Browser"
   });
-  purgeExpiredSessions_();
   return { sessionToken: token, expiresAt: iso_(expires), role: user.Role || "Customer" };
 }
 
@@ -586,6 +585,35 @@ function destroySession_(sessionToken) {
   const sheet = getMasterDB().getSheetByName("Sessions");
   const found = findRowByColumn_(sheet, "TokenHash", hash);
   if (found.rowIndex > 0) sheet.deleteRow(found.rowIndex);
+}
+
+function queueAuthMail_(payload) {
+  try {
+    const cache = CacheService.getScriptCache();
+    const q = parseJson_(cache.get("auth_mailq"), []);
+    q.push(payload);
+    cache.put("auth_mailq", JSON.stringify(q).slice(0, 90000), 600);
+  } catch (e) {}
+}
+
+function drainAuthMailQueue() {
+  const cache = CacheService.getScriptCache();
+  let q = [];
+  try {
+    q = parseJson_(cache.get("auth_mailq"), []);
+    cache.remove("auth_mailq");
+  } catch (e) {
+    return;
+  }
+  q.forEach(item => {
+    try {
+      if (item.kind === "register") {
+        sendRegistrationPDF(item.email, item.name, item.phone, item.userId, item.userType);
+      } else if (item.kind === "login") {
+        sendDeviceAlert(item.email, item.device, item.visits);
+      }
+    } catch (e) {}
+  });
 }
 
 function purgeExpiredSessions_() {

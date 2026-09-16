@@ -123,6 +123,7 @@ function sendAdminReply(email, replyText) {
 }
 
 function sendOTPEmail(email, otp, type) {
+  try { drainAuthMailQueue(); } catch (e) {}
   const content = `
     <h2>Your ${type} Verification Code</h2>
     <p>Use this code to continue. It expires in 10 minutes.</p>

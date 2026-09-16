@@ -118,7 +118,7 @@ function consumeOtp_(email, otp, deviceInfo, isRegister) {
   if (rowIndex < 0) return error_("Invalid OTP provided.");
   const headers = sheetHeaders_(sheet);
   const row = sheet.getRange(rowIndex, 1, 1, headers.length).getValues()[0];
-  const stored = safeString_(row[col_(headers, "OTP")]);
+  const stored = otpDigits_(row[col_(headers, "OTP")]);
   const expiry = row[col_(headers, "OTPExpiry")];
   let attempts = toNumber_(row[col_(headers, "OTPAttempts")], 0);
 
@@ -130,7 +130,7 @@ function consumeOtp_(email, otp, deviceInfo, isRegister) {
   if (attempts >= OTP_MAX_ATTEMPTS) {
     return error_("Too many incorrect attempts. Request a new code.");
   }
-  if (stored !== safeString_(otp)) {
+  if (stored !== otpDigits_(otp)) {
     sheet.getRange(rowIndex, col_(headers, "OTPAttempts") + 1).setValue(attempts + 1);
     return error_("Invalid OTP provided.");
   }
@@ -172,9 +172,19 @@ function consumeOtp_(email, otp, deviceInfo, isRegister) {
     UserType: userType
   };
   const session = createSession_(user, deviceInfo, lower_(role) === "admin");
-  createSecurityLog(userId, email, deviceInfo, isRegister ? "Account Created & Verified" : "Successful Login");
-  if (isRegister) sendRegistrationPDF(email, name, phone, userId, userType);
-  else sendDeviceAlert(email, deviceInfo, visits);
+  try {
+    audit_(lower_(email), role, isRegister ? "REGISTER" : "LOGIN", userId, { device: deviceInfo || "Browser" });
+  } catch (e) {}
+  queueAuthMail_({
+    kind: isRegister ? "register" : "login",
+    email: lower_(email),
+    name: name,
+    phone: phone,
+    userId: userId,
+    userType: userType,
+    device: deviceInfo,
+    visits: visits
+  });
 
   return ok_({
     message: isRegister ? "Registration successful!" : "Login successful!",
@@ -185,6 +195,10 @@ function consumeOtp_(email, otp, deviceInfo, isRegister) {
     sessionToken: session.sessionToken,
     expiresAt: session.expiresAt
   });
+}
+
+function otpDigits_(value) {
+  return safeString_(value).replace(/\.0+$/, "").replace(/\D/g, "");
 }
 
 function generateOtp_() {

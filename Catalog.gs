@@ -1010,9 +1010,13 @@ function installTriggers() {
   if (names.indexOf("purgeExpiredSessions_") === -1) {
     ScriptApp.newTrigger("purgeExpiredSessions_").timeBased().everyHours(6).create();
   }
+  if (names.indexOf("drainAuthMailQueue") === -1) {
+    ScriptApp.newTrigger("drainAuthMailQueue").timeBased().everyMinutes(1).create();
+  }
 }
 
 function processScheduledStock() {
+  try { drainAuthMailQueue(); } catch (e) {}
   const at = now_();
   const products = getMasterDB().getSheetByName("Products");
   rowsAsObjects_(products).forEach(p => {

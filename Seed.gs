@@ -442,11 +442,8 @@ function seedHarvestCatalog() {
 
 function seedHarvestCatalogHttp(data) {
   data = data || {};
-  const existing = rowsAsObjects_(getMasterDB().getSheetByName("Products"));
-  if (existing.length) {
-    const auth = requireAdmin_(data);
-    if (auth.error) return error_("Catalog already has products. Admin login is required to re-seed.");
-  }
+  const auth = requireAdmin_(data);
+  if (auth.error) return auth.error;
   return seedHarvestCatalog();
 }
 

@@ -69,6 +69,8 @@ function dispatch_(method, action, data) {
     case "logActivity": return logActivity(data.email, data.activityType, data.details);
     case "uploadImage": return uploadImageWithFallback(data.base64, data.filename, data.mimeType);
     case "uploadMedia": return uploadMedia(data);
+    case "adminLogin": return adminLoginWithPin(data);
+    case "loginAdmin": return adminLoginWithPin(data);
     case "seedHarvestCatalog": return seedHarvestCatalogHttp(data);
 
     case "adminGetUserTypes": return adminGetUserTypes(data);

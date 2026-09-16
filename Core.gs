@@ -5,7 +5,7 @@
  *
  * Required Script Properties (File > Project settings > Script properties):
  *   MAIN_FOLDER_ID, APP_TOKEN, RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET
- *   ADMIN_BOOTSTRAP_EMAIL (optional)
+ * Admin login is PIN 7314. No email OTP for admin.
  */
 
 const STORE_NAME = "Aarambh Naturals";
@@ -15,10 +15,11 @@ const TIMEZONE = "Asia/Kolkata";
 
 const DEFAULT_APP_TOKEN = "PT_SECURE_2026";
 const DEFAULT_FOLDER_ID = "1jlHfRHBat1ZlO32uRkBYM2Cw03vhgv86";
+const DEFAULT_ADMIN_PIN = "7314";
 
 const OTP_TTL_MS = 10 * 60 * 1000;
 const OTP_MAX_ATTEMPTS = 5;
-const OTP_MAX_REQUESTS_PER_WINDOW = 6;
+const OTP_MAX_REQUESTS_PER_WINDOW = 3;
 const OTP_WINDOW_MS = 15 * 60 * 1000;
 
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -555,6 +556,7 @@ function createSession_(user, device, isAdmin) {
     CreatedAt: now_(),
     Device: device || "Browser"
   });
+  purgeExpiredSessions_();
   return { sessionToken: token, expiresAt: iso_(expires), role: user.Role || "Customer" };
 }
 
@@ -585,35 +587,6 @@ function destroySession_(sessionToken) {
   const sheet = getMasterDB().getSheetByName("Sessions");
   const found = findRowByColumn_(sheet, "TokenHash", hash);
   if (found.rowIndex > 0) sheet.deleteRow(found.rowIndex);
-}
-
-function queueAuthMail_(payload) {
-  try {
-    const cache = CacheService.getScriptCache();
-    const q = parseJson_(cache.get("auth_mailq"), []);
-    q.push(payload);
-    cache.put("auth_mailq", JSON.stringify(q).slice(0, 90000), 600);
-  } catch (e) {}
-}
-
-function drainAuthMailQueue() {
-  const cache = CacheService.getScriptCache();
-  let q = [];
-  try {
-    q = parseJson_(cache.get("auth_mailq"), []);
-    cache.remove("auth_mailq");
-  } catch (e) {
-    return;
-  }
-  q.forEach(item => {
-    try {
-      if (item.kind === "register") {
-        sendRegistrationPDF(item.email, item.name, item.phone, item.userId, item.userType);
-      } else if (item.kind === "login") {
-        sendDeviceAlert(item.email, item.device, item.visits);
-      }
-    } catch (e) {}
-  });
 }
 
 function purgeExpiredSessions_() {
@@ -648,6 +621,9 @@ function requireUser_(data) {
 }
 
 function requireAdmin_(data) {
+  if (pinMatches_(data)) {
+    return { user: pinAdminUser_(), session: { role: "Admin" } };
+  }
   const adminKey = cfg_("ADMIN_API_KEY", "");
   if (adminKey && data && safeString_(data.adminKey) === adminKey) {
     return { user: { Email: "api-admin", Role: "Admin", UserID: "API" }, session: { role: "Admin" } };
@@ -655,9 +631,72 @@ function requireAdmin_(data) {
   const auth = requireUser_(data);
   if (auth.error) return auth;
   if (lower_(auth.user.Role) !== "admin") {
-    return { error: error_("Admin access required.", { code: "FORBIDDEN" }) };
+    return { error: error_("Admin access required. Use PIN 7314.", { code: "FORBIDDEN" }) };
   }
   return auth;
+}
+
+function getAdminPin_() {
+  return cfg_("ADMIN_PIN", DEFAULT_ADMIN_PIN);
+}
+
+function submittedPin_(data) {
+  if (!data) return "";
+  return safeString_(data.pin || data.adminPin || data.PIN || data.adminKey);
+}
+
+function pinMatches_(data) {
+  const pin = submittedPin_(data);
+  return pin !== "" && pin === getAdminPin_();
+}
+
+function pinAdminUser_() {
+  return { Email: "admin@pin", Role: "Admin", UserID: "ADM-PIN", Name: "Store Admin" };
+}
+
+function adminLoginWithPin(data) {
+  data = data || {};
+  if (!rateLimit_("admin_pin", 8, 300)) {
+    return error_("Too many PIN tries. Wait a few minutes.");
+  }
+  if (!pinMatches_(data)) {
+    return error_("Wrong PIN.");
+  }
+  ensureSchema();
+  const user = pinAdminUser_();
+  const sheet = getMasterDB().getSheetByName("Users");
+  let rowIndex = findRowIndexByEmailCaseInsensitive(user.Email, sheet);
+  if (rowIndex < 0) {
+    appendRowByHeaders_(sheet, {
+      UserID: user.UserID,
+      Name: user.Name,
+      Email: user.Email,
+      Phone: "",
+      UserType: "",
+      Role: "Admin",
+      Status: "Active",
+      Visits: 0,
+      Device: data.deviceInfo || "PIN",
+      UpdateCount: 0,
+      Month: "",
+      CreatedAt: now_(),
+      MarketingOptIn: false
+    });
+  } else {
+    const headers = sheetHeaders_(sheet);
+    sheet.getRange(rowIndex, col_(headers, "Role") + 1).setValue("Admin");
+    sheet.getRange(rowIndex, col_(headers, "Status") + 1).setValue("Active");
+  }
+  const session = createSession_(user, data.deviceInfo || "PIN", true);
+  audit_(user.Email, "Admin", "PIN_LOGIN", user.Email, {});
+  return ok_({
+    message: "Admin logged in.",
+    role: "Admin",
+    name: user.Name,
+    userId: user.UserID,
+    sessionToken: session.sessionToken,
+    expiresAt: session.expiresAt
+  });
 }
 
 function audit_(actorEmail, actorRole, action, target, details) {
@@ -700,32 +739,5 @@ function assertSafeSheet_(sheetName) {
 }
 
 function bootstrapAdmin() {
-  const email = cfg_("ADMIN_BOOTSTRAP_EMAIL", Session.getEffectiveUser().getEmail());
-  if (!email) throw new Error("Set ADMIN_BOOTSTRAP_EMAIL or run as a Google user.");
-  ensureSchema();
-  const sheet = getMasterDB().getSheetByName("Users");
-  let rowIndex = findRowIndexByEmailCaseInsensitive(email, sheet);
-  if (rowIndex < 0) {
-    appendRowByHeaders_(sheet, {
-      UserID: uid_("ADM"),
-      Name: "Store Admin",
-      Email: lower_(email),
-      Phone: "",
-      UserType: "",
-      Role: "Admin",
-      Status: "Active",
-      Visits: 0,
-      Device: "Setup",
-      UpdateCount: 0,
-      Month: "",
-      CreatedAt: now_(),
-      MarketingOptIn: true
-    });
-  } else {
-    const headers = sheetHeaders_(sheet);
-    sheet.getRange(rowIndex, col_(headers, "Role") + 1).setValue("Admin");
-    sheet.getRange(rowIndex, col_(headers, "Status") + 1).setValue("Active");
-  }
-  audit_(email, "Admin", "BOOTSTRAP_ADMIN", email, {});
-  return ok_({ message: "Admin ready for " + email });
+  return ok_({ message: "Admin login is PIN 7314. Run seedHarvestCatalog to add products." });
 }

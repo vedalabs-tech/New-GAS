@@ -1,0 +1,124 @@
+// Add these two lines to doGet / doPost in Code.gs, then save this file in the same Apps Script project.
+// doGet:  if (action === "getAddresses") return jsonResponse(getAddressesBook(e.parameter.email));
+// doPost: if (action === "saveAddresses") return jsonResponse(saveAddressesBook(data.email, data.addresses || data.Addresses_JSON));
+
+function parseAddressList(raw) {
+  if (!raw) return [];
+  let list = raw;
+  if (typeof raw === "string") {
+    try { list = JSON.parse(raw); } catch (e) { return []; }
+  }
+  if (!Array.isArray(list)) return [];
+  return list.map(function(row) {
+    const rec = row || {};
+    return {
+      l1: String(rec.l1 || rec.Address_Line_1 || rec.line1 || ""),
+      l2: String(rec.l2 || rec.Address_Line_2 || rec.line2 || ""),
+      city: String(rec.city || rec.City || ""),
+      state: String(rec.state || rec.State || ""),
+      pin: String(rec.pin || rec.pincode || rec.Pincode || "")
+    };
+  }).filter(function(row) {
+    return row.l1 || row.city || row.pin;
+  });
+}
+
+function readAddressBookForEmail(email) {
+  if (!email) return [];
+  try {
+    const sheet = getMasterDB().getSheetByName("Users");
+    const rowIndex = findRowIndexByEmailCaseInsensitive(email, sheet);
+    if (rowIndex < 1) return [];
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const fileIdIndex = headers.findIndex(function(h) { return String(h).toLowerCase() === "addressfileid"; });
+    if (fileIdIndex < 0) return [];
+    const fileId = sheet.getRange(rowIndex, fileIdIndex + 1).getValue();
+    if (!fileId) return [];
+    const addrSheet = SpreadsheetApp.openById(fileId).getSheetByName("Saved_Addresses");
+    if (!addrSheet || addrSheet.getLastRow() <= 1) return [];
+    const aData = addrSheet.getRange(1, 1, addrSheet.getLastRow(), 5).getValues();
+    const aArr = [];
+    for (let r = 1; r < aData.length; r++) {
+      const row = {
+        l1: String(aData[r][0] || ""),
+        l2: String(aData[r][1] || ""),
+        city: String(aData[r][2] || ""),
+        state: String(aData[r][3] || ""),
+        pin: String(aData[r][4] || "")
+      };
+      if (row.l1 || row.city || row.pin) aArr.push(row);
+    }
+    return aArr;
+  } catch (e) {
+    console.warn("readAddressBookForEmail:", e.message);
+    return [];
+  }
+}
+
+function getOrCreateAddressSheet(email) {
+  const sheet = getMasterDB().getSheetByName("Users");
+  const rowIndex = findRowIndexByEmailCaseInsensitive(email, sheet);
+  if (rowIndex < 1) return null;
+  let headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  let fileIdIndex = headers.findIndex(function(h) { return String(h).toLowerCase() === "addressfileid"; });
+  if (fileIdIndex < 0) {
+    sheet.getRange(1, headers.length + 1).setValue("AddressFileID");
+    headers.push("AddressFileID");
+    fileIdIndex = headers.length - 1;
+    SpreadsheetApp.flush();
+  }
+  let fileId = sheet.getRange(rowIndex, fileIdIndex + 1).getValue();
+  let addrSheet = null;
+  if (fileId) {
+    try {
+      addrSheet = SpreadsheetApp.openById(fileId).getSheetByName("Saved_Addresses");
+    } catch (e) {
+      addrSheet = null;
+    }
+  }
+  if (!addrSheet) {
+    let addrFolderId = PropertiesService.getScriptProperties().getProperty("ADDRESS_VAULT_ID");
+    let addrFolder;
+    try {
+      addrFolder = addrFolderId ? DriveApp.getFolderById(addrFolderId) : DriveApp.getRootFolder();
+    } catch (e) {
+      addrFolder = DriveApp.getRootFolder();
+    }
+    const created = SpreadsheetApp.create("User_Addresses_" + Date.now());
+    try {
+      if (addrFolder.getId() !== DriveApp.getRootFolder().getId()) {
+        DriveApp.getFileById(created.getId()).moveTo(addrFolder);
+      }
+    } catch (e) {}
+    addrSheet = created.getActiveSheet();
+    addrSheet.setName("Saved_Addresses");
+    addrSheet.appendRow(["Address_Line_1", "Address_Line_2", "City", "State", "Pincode"]);
+    sheet.getRange(rowIndex, fileIdIndex + 1).setValue(created.getId());
+    SpreadsheetApp.flush();
+  }
+  return addrSheet;
+}
+
+function getAddressesBook(email) {
+  if (!email) return {status: "error", message: "Email is required."};
+  const addresses = readAddressBookForEmail(email);
+  return {status: "success", addresses: addresses, Addresses_JSON: JSON.stringify(addresses)};
+}
+
+function saveAddressesBook(email, addressesRaw) {
+  if (!email) return {status: "error", message: "Email is required."};
+  const sheet = getMasterDB().getSheetByName("Users");
+  const rowIndex = findRowIndexByEmailCaseInsensitive(email, sheet);
+  if (rowIndex < 1) return {status: "error", message: "User record not found."};
+  const list = parseAddressList(addressesRaw);
+  const addrSheet = getOrCreateAddressSheet(email);
+  if (!addrSheet) return {status: "error", message: "Could not open the address book."};
+  const last = addrSheet.getLastRow();
+  if (last > 1) addrSheet.deleteRows(2, last - 1);
+  list.forEach(function(row) {
+    addrSheet.appendRow([row.l1 || "", row.l2 || "", row.city || "", row.state || "", row.pin || ""]);
+  });
+  SpreadsheetApp.flush();
+  return {status: "success", addresses: list, message: "Addresses saved."};
+}
+

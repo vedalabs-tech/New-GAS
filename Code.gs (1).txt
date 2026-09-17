@@ -1,0 +1,2911 @@
+/**
+ * ONLINE STORE BACKEND ENGINE - AARAMBH NATURALS
+ * Fully optimized, hardened, and error-tolerant Google Apps Script backend.
+ * Supports: Media Uploads, Nested Categories, Auto-Stock Scheduling, User Types, COD Control, and Review Moderation.
+ */
+
+// ==========================================
+// 1. GLOBAL CONSTANTS & MASTER KEYS
+// ==========================================
+const MAIN_FOLDER_ID = "1jlHfRHBat1ZlO32uRkBYM2Cw03vhgv86"; 
+const RAZORPAY_LIVE_KEY = "rzp_live_SVstISgPrcivjP"; 
+const LOGO_URL = "https://raw.githubusercontent.com/TOOLS-droid724/Logo/ae0efe81ab05d73bf85a3df1e9be516c3ca35f21/34826.png"; 
+const APP_TOKEN = "PT_SECURE_2026"; 
+
+// ==========================================
+// 2. SYSTEM ECOSYSTEM SETUP
+// ==========================================
+function setupEcosystem() {
+  let mainFolder;
+  try {
+    mainFolder = DriveApp.getFolderById(MAIN_FOLDER_ID);
+  } catch(e) {
+    const existing = DriveApp.getRootFolder().getFoldersByName("Aarambh_Naturals_Ecosystem");
+    mainFolder = existing.hasNext() ? existing.next() : DriveApp.getRootFolder().createFolder("Aarambh_Naturals_Ecosystem");
+  }
+
+  const adminVault = getOrCreateFolder(mainFolder, "Admin_Vault");
+  const customerBase = getOrCreateFolder(mainFolder, "Customer_Base");
+  const securityLogs = getOrCreateFolder(mainFolder, "Security_Logs");
+  const mediaVault = getOrCreateFolder(mainFolder, "Media_Vault"); 
+  const addressVault = getOrCreateFolder(mainFolder, "Address_Vault"); 
+
+  PropertiesService.getScriptProperties().setProperty("MAIN_FOLDER_ID", mainFolder.getId());
+  PropertiesService.getScriptProperties().setProperty("CUSTOMER_BASE_ID", customerBase.getId());
+  PropertiesService.getScriptProperties().setProperty("SECURITY_LOGS_ID", securityLogs.getId());
+  PropertiesService.getScriptProperties().setProperty("MEDIA_VAULT_ID", mediaVault.getId()); 
+  PropertiesService.getScriptProperties().setProperty("ADDRESS_VAULT_ID", addressVault.getId());
+
+  let masterSheetId = PropertiesService.getScriptProperties().getProperty("MASTER_SHEET_ID");
+  let ss;
+  
+  if (masterSheetId) {
+    try {
+      ss = SpreadsheetApp.openById(masterSheetId);
+    } catch(e) {
+      masterSheetId = null;
+    }
+  }
+
+  if (!masterSheetId) {
+    const newMaster = SpreadsheetApp.create("MASTER_DB");
+    try {
+      DriveApp.getFileById(newMaster.getId()).moveTo(adminVault);
+    } catch(e) {
+      console.warn("Could not move MASTER_DB to adminVault:", e.message);
+    }
+    masterSheetId = newMaster.getId();
+    PropertiesService.getScriptProperties().setProperty("MASTER_SHEET_ID", masterSheetId);
+    ss = newMaster;
+  }
+
+  // Expanded schemas with:
+  // - Products: ParentCategory, Media_URLs (unlimited photos/videos), COD_Available, Scheduled_Live_Date
+  // - Categories: CategoryID, CategoryName, ParentCategoryID, Status (Active/Hidden), Scheduled_Live_Date
+  // - Reviews: ReviewID, ProductID, UserName, UserEmail, Rating, Comment, Media_URLs, Date, Status (Pending/Approved)
+  // - Users: UserType (personalization)
+  const requiredSheets = [
+    { 
+      name: "Users", 
+      headers: ["Name", "Email", "Phone", "UserType", "OTP", "Status", "ProfilePic", "Visits", "Device", "UpdateCount", "Month", "UserID", "VaultID", "AddressFileID", "LastSeen"] 
+    },
+    { 
+      name: "Products", 
+      headers: ["ID", "Name", "Category", "ParentCategory", "Price", "MRP", "Stock", "Image_URL", "Media_URLs", "Description", "Status", "COD_Available", "Scheduled_Live_Date"] 
+    },
+    { 
+      name: "Categories", 
+      headers: ["CategoryID", "CategoryName", "ParentCategoryID", "Status", "Scheduled_Live_Date"] 
+    },
+    { 
+      name: "Orders", 
+      headers: ["Order_ID", "Email", "Items", "Amount", "Razorpay_ID", "Status", "Date", "Delivery_Address", "Courier_Name", "Tracking_Number", "Estimated_Delivery"] 
+    },
+    { 
+      name: "Carts", 
+      headers: ["Email", "CartJSON"] 
+    },
+    { 
+      name: "Waitlist", 
+      headers: ["ProductID", "Email", "Date"] 
+    },
+    { 
+      name: "Reviews", 
+      headers: ["ReviewID", "ProductID", "UserName", "UserEmail", "Rating", "Comment", "Media_URLs", "Date", "Status"] 
+    },
+    {
+      name: "Banners",
+      headers: ["BannerID", "Title", "Subtitle", "ImageURL", "LinkURL", "TargetCategory", "BadgeText", "ButtonText", "Sequence", "Status", "CreatedAt"]
+    },
+    {
+      name: "UserTypes",
+      headers: ["TypeID", "TypeName", "Description", "DiscountPercent", "Status", "CreatedAt"]
+    }
+  ];
+
+  requiredSheets.forEach(item => {
+    let sheet = ss.getSheetByName(item.name);
+    if (!sheet) {
+      sheet = ss.insertSheet(item.name);
+      sheet.appendRow(item.headers);
+    } else {
+      // Auto-migrate missing headers
+      let lastCol = sheet.getLastColumn();
+      if (lastCol === 0) {
+        sheet.appendRow(item.headers);
+      } else {
+        let headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+        let lowerHeaders = headers.map(h => String(h).toLowerCase().trim());
+        item.headers.forEach(h => {
+          if (!lowerHeaders.includes(h.toLowerCase().trim())) {
+            sheet.getRange(1, headers.length + 1).setValue(h);
+            headers.push(h);
+            lowerHeaders.push(h.toLowerCase().trim());
+          }
+        });
+      }
+    }
+  });
+
+  let defaultSheet = ss.getSheetByName("Sheet1");
+  if (defaultSheet && ss.getSheets().length > 1) {
+    try {
+      defaultSheet.setName("Dashboard");
+    } catch(e) {}
+  }
+
+  SpreadsheetApp.flush();
+  console.log("[SUCCESS] Ecosystem installed! Advanced Categories, Media Vault, and Schemas are ready.");
+  return {status: "success", masterSheetId: masterSheetId};
+}
+
+// ==========================================
+// 3. API ROUTING (GET & POST)
+// ==========================================
+function doGet(e) {
+  try {
+    if (!e || !e.parameter || e.parameter.token !== APP_TOKEN) {
+      return jsonResponse({status: "error", message: "Access Denied! Invalid or missing security token."});
+    }
+    const action = e.parameter.action;
+
+    if (action === "getProducts") return jsonResponse(getProductsFromSheet(e.parameter.includeScheduled === "true"));
+    if (action === "getCategories") return jsonResponse(getCategoriesTree(e.parameter.includeHidden === "true"));
+    if (action === "getOrderHistory") return jsonResponse(getOrderHistory(e.parameter.email));
+    if (action === "trackOrder") return jsonResponse(trackOrder(e.parameter.query || e.parameter.orderId || e.parameter.email));
+    if (action === "getCart") return jsonResponse(getCart(e.parameter.email));
+    if (action === "getReviews") return jsonResponse(getApprovedReviews(e.parameter.productId));
+    if (action === "getAllReviewsAdmin") return jsonResponse(getAllReviewsForAdmin());
+    if (action === "getBanners") return jsonResponse(getBannersFromSheet(e.parameter.includeInactive === "true"));
+    if (action === "getUserTypes") return jsonResponse(getUserTypesFromSheet(e.parameter.includeInactive === "true"));
+    if (action === "getStoreConfig") {
+      const liveKey = PropertiesService.getScriptProperties().getProperty("RAZORPAY_KEY_ID") || RAZORPAY_LIVE_KEY;
+      return jsonResponse({status: "success", rzpKey: liveKey});
+    }
+    if (action === "getAddresses") return jsonResponse(getAddressesBook(e.parameter.email));
+    if (action === "readUniversal") return jsonResponse(getUniversalData(e.parameter.sheetName));
+
+    return jsonResponse({status: "error", message: "Invalid GET Action: " + (action || "none")});
+  } catch (err) {
+    return jsonResponse({status: "error", message: "Server error during doGet: " + err.message});
+  }
+}
+
+function doPost(e) {
+  try {
+    if (!e || !e.postData || !e.postData.contents) {
+      return jsonResponse({status: "error", message: "No data payload received."});
+    }
+
+    let data;
+    try {
+      data = JSON.parse(e.postData.contents);
+    } catch(parseErr) {
+      return jsonResponse({status: "error", message: "Malformed JSON payload: " + parseErr.message});
+    }
+
+    if (!data || data.token !== APP_TOKEN) {
+      return jsonResponse({status: "error", message: "Access Denied! Invalid security token."});
+    }
+    const action = data.action;
+
+    // AUTH ACTIONS (With UserType Personalization)
+    if (action === "requestRegisterOTP") return jsonResponse(requestRegisterOTP(data.name, data.email, data.phone, data.userType));
+    if (action === "verifyRegisterOTP") return jsonResponse(verifyRegisterOTP(data.email, data.otp, data.deviceInfo));
+    if (action === "requestLoginOTP") return jsonResponse(requestLoginOTP(data.email));
+    if (action === "verifyLoginOTP") return jsonResponse(verifyLoginOTP(data.email, data.otp, data.deviceInfo));
+
+    // CUSTOMER ACTIONS
+    if (action === "updateProfile") return jsonResponse(updateSecureProfile(data));
+    if (action === "saveAddresses") return jsonResponse(saveAddressesBook(data.email, data.addresses || data.Addresses_JSON));
+    if (action === "placeOrder") return jsonResponse(processOrder(data));
+    if (action === "syncCart") return jsonResponse(syncCart(data.email, data.cartItems));
+    if (action === "addWaitlist") return jsonResponse(addToWaitlist(data.email, data.productId));
+    if (action === "addReviewWithMedia") return jsonResponse(addReviewWithMedia(data));
+    if (action === "logActivity") return jsonResponse(logActivity(data.email, data.activityType, data.details)); 
+
+    // ADVANCED CATEGORY MANAGEMENT (Admin)
+    if (action === "saveCategory") return jsonResponse(saveCategory(data.category));
+    if (action === "deleteCategory") return jsonResponse(deleteCategory(data.categoryId || data.categoryName));
+    if (action === "toggleCategoryStatus") return jsonResponse(toggleCategoryStatus(data.categoryId, data.status));
+
+    // PRODUCT MANAGEMENT (Admin with Unlimited Media, COD Toggle, Auto-Stock Scheduling)
+    if (action === "saveProduct") return jsonResponse(saveProduct(data.product));
+    if (action === "deleteProduct") return jsonResponse(deleteProduct(data.productId));
+
+    // REVIEW MODERATION (Admin)
+    if (action === "moderateReview") return jsonResponse(moderateReview(data.reviewId, data.status));
+
+    // DYNAMIC BANNER MANAGEMENT (Admin & Storefront Dynamic Connection)
+    if (action === "saveBanner") return jsonResponse(saveBanner(data.banner));
+    if (action === "deleteBanner") return jsonResponse(deleteBanner(data.bannerId));
+    if (action === "toggleBannerStatus") return jsonResponse(toggleBannerStatus(data.bannerId, data.status));
+    if (action === "reorderBanners") return jsonResponse(reorderBanners(data.bannerIds));
+
+    // DYNAMIC USER TYPE (PERSON TYPE) MANAGEMENT (Admin)
+    if (action === "saveUserType") return jsonResponse(saveUserType(data.userType));
+    if (action === "deleteUserType") return jsonResponse(deleteUserType(data.userTypeId));
+    if (action === "toggleUserTypeStatus") return jsonResponse(toggleUserTypeStatus(data.userTypeId, data.status));
+
+    // MEDIA UPLOADS (Admin Product Media & Customer Review Media)
+    if (action === "uploadMedia") return jsonResponse(uploadMediaWithFallback(data.base64, data.filename, data.mimeType));
+
+    // ADMIN OPERATIONS
+    if (action === "trackOrder") return jsonResponse(trackOrder(data.query || data.orderId || data.email));
+    if (action === "updateOrderStatus") return jsonResponse(updateOrderStatusAndAlert(data.orderId, data.status, data.courierName, data.trackingNumber, data.estimatedDelivery));
+    if (action === "universalWrite") return jsonResponse(universalWrite(data.sheetName, data.rowData)); 
+    if (action === "universalWriteDynamic") return jsonResponse(universalWriteDynamic(data.sheetName, data.payload)); 
+    if (action === "universalUpdate") return jsonResponse(universalUpdate(data.sheetName, data.searchCol, data.searchValue, data.updateCol, data.updateValue));
+    if (action === "sendAdminReply") return jsonResponse(sendAdminReply(data.email, data.replyText));
+    if (action === "sendBulkPromo") return jsonResponse(sendBulkPromo(data.title, data.message, data.bannerUrl));
+
+    return jsonResponse({status: "error", message: "Invalid POST Action: " + (action || "none")});
+  } catch (err) {
+    return jsonResponse({status: "error", message: "Server error during doPost: " + err.message});
+  }
+}
+
+function jsonResponse(data) {
+  return ContentService.createTextOutput(JSON.stringify(data))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+// ==========================================
+// 1. CORE DATABASE UTILITIES
+// ==========================================
+function getOrCreateFolder(parentFolder, folderName) {
+  if (!parentFolder) parentFolder = DriveApp.getRootFolder();
+  try {
+    const folders = parentFolder.getFoldersByName(folderName);
+    return folders.hasNext() ? folders.next() : parentFolder.createFolder(folderName);
+  } catch(e) {
+    console.warn("Folder access warning:", e.message);
+    return DriveApp.getRootFolder();
+  }
+}
+
+function getMasterDB() {
+  const id = PropertiesService.getScriptProperties().getProperty("MASTER_SHEET_ID");
+  if (id) {
+    try {
+      return SpreadsheetApp.openById(id);
+    } catch(e) {
+      console.warn("Could not open spreadsheet by MASTER_SHEET_ID:", e.message);
+    }
+  }
+
+  // Fallback to active spreadsheet if script is container-bound
+  try {
+    const active = SpreadsheetApp.getActiveSpreadsheet();
+    if (active) return active;
+  } catch(e) {}
+
+  // Fallback to auto-setting up ecosystem
+  const setupResult = setupEcosystem();
+  if (setupResult && setupResult.masterSheetId) {
+    return SpreadsheetApp.openById(setupResult.masterSheetId);
+  }
+
+  throw new Error("System is not ready. MASTER_DB could not be located. Please run setupEcosystem().");
+}
+
+function ensureDynamicColumns(sheet, dataObject) {
+  if (!sheet) return [];
+  let lastCol = sheet.getLastColumn();
+
+  if (lastCol === 0) {
+    let initialHeaders = Object.keys(dataObject).filter(k => k !== "action" && k !== "token" && k !== "email");
+    if (initialHeaders.length > 0) {
+      sheet.appendRow(initialHeaders);
+      SpreadsheetApp.flush();
+      return initialHeaders;
+    }
+    return [];
+  }
+
+  let headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  let lowerHeaders = headers.map(h => String(h).toLowerCase().trim());
+  let columnsAdded = false;
+
+  Object.keys(dataObject).forEach(key => {
+    if (key !== "action" && key !== "token" && key !== "email") {
+      let lowerKey = String(key).toLowerCase().trim();
+      if (!lowerHeaders.includes(lowerKey)) {
+        sheet.getRange(1, headers.length + 1).setValue(key);
+        headers.push(key);
+        lowerHeaders.push(lowerKey);
+        columnsAdded = true;
+      }
+    }
+  });
+
+  if (columnsAdded) SpreadsheetApp.flush();
+  return headers;
+}
+
+// ==========================================
+// 2. UNIVERSAL READ/WRITE & AUTO-COMBINE
+// ==========================================
+function getUniversalData(sheetName) {
+  try {
+    SpreadsheetApp.flush(); 
+    const master = getMasterDB();
+    const sheet = master.getSheetByName(sheetName);
+    if (!sheet) return [];
+    
+    const lastRow = sheet.getLastRow();
+    const lastCol = sheet.getLastColumn();
+    if (lastRow <= 1 || lastCol === 0) return [];
+
+    const data = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+    if (data.length <= 1) return [];
+    
+    const rawHeaders = data.shift(); 
+    const headers = rawHeaders.map(h => String(h).trim());
+
+    return data.map(row => { 
+      let obj = {}; 
+      headers.forEach((h, i) => {
+        if (h) {
+          let val = row[i];
+          if (val instanceof Date) {
+            val = val.toISOString();
+          }
+          obj[h] = val;
+        }
+      }); 
+
+      // Safe address lookup for user rows
+      if (sheetName === "Users") {
+        let addrFileId = obj["AddressFileID"];
+        if (addrFileId) {
+          try {
+            let addrSheet = SpreadsheetApp.openById(addrFileId).getSheetByName("Saved_Addresses");
+            if (addrSheet && addrSheet.getLastRow() > 1) {
+              let aData = addrSheet.getRange(1, 1, addrSheet.getLastRow(), 5).getValues();
+              let aArr = [];
+              for (let r = 1; r < aData.length; r++) {
+                aArr.push({ 
+                  l1: String(aData[r][0] || ""), 
+                  l2: String(aData[r][1] || ""), 
+                  city: String(aData[r][2] || ""), 
+                  state: String(aData[r][3] || ""), 
+                  pin: String(aData[r][4] || "") 
+                });
+              }
+              obj["Addresses_JSON"] = JSON.stringify(aArr); 
+            } else { 
+              obj["Addresses_JSON"] = "[]"; 
+            }
+          } catch(e) { 
+            obj["Addresses_JSON"] = "[]"; 
+          }
+        } else {
+          obj["Addresses_JSON"] = "[]";
+        }
+      }
+      return obj; 
+    });
+  } catch(e) {
+    console.warn("Error reading universal data for sheet " + sheetName + ":", e.message);
+    return [];
+  }
+}
+
+function universalWriteDynamic(sheetName, payloadObj) {
+  if (!payloadObj || typeof payloadObj !== "object") {
+    return {status: "error", message: "Invalid payload object provided."};
+  }
+
+  const master = getMasterDB();
+  let sheet = master.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = master.insertSheet(sheetName);
+    sheet.appendRow(Object.keys(payloadObj));
+  }
+  
+  let headers = ensureDynamicColumns(sheet, payloadObj);
+  let newRow = new Array(headers.length).fill("");
+  
+  Object.keys(payloadObj).forEach(k => {
+    let i = headers.indexOf(k);
+    if (i > -1) {
+      let val = payloadObj[k];
+      if (typeof val === "object" && val !== null) val = JSON.stringify(val);
+      newRow[i] = val;
+    }
+  });
+
+  sheet.appendRow(newRow);
+  SpreadsheetApp.flush();
+  return {status: "success"};
+}
+
+function universalWrite(sheetName, rowDataArray) {
+  const master = getMasterDB();
+  let sheet = master.getSheetByName(sheetName);
+  if (!sheet) sheet = master.insertSheet(sheetName); 
+
+  let processedArray = Array.isArray(rowDataArray) ? rowDataArray.map(item => {
+    if (typeof item === "object" && item !== null && !(item instanceof Date)) {
+      return JSON.stringify(item);
+    }
+    return item;
+  }) : [rowDataArray];
+
+  sheet.appendRow(processedArray);
+  SpreadsheetApp.flush();
+  return {status: "success"};
+}
+
+function universalUpdate(sheetName, searchColIndex, searchValue, updateColIndex, updateValue) {
+  const master = getMasterDB();
+  const sheet = master.getSheetByName(sheetName);
+  if (!sheet) return {status: "error", message: "Target sheet '" + sheetName + "' not found."};
+
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  if (lastRow <= 1) return {status: "error", message: "No data rows exist in sheet."};
+
+  if (searchColIndex < 0 || updateColIndex < 0 || searchColIndex >= lastCol) {
+    return {status: "error", message: "Invalid column index specified."};
+  }
+
+  const data = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][searchColIndex]).trim() === String(searchValue).trim()) {
+      let val = updateValue;
+      if (typeof val === "object" && val !== null && !(val instanceof Date)) {
+        val = JSON.stringify(val);
+      }
+      sheet.getRange(i + 1, updateColIndex + 1).setValue(val);
+      SpreadsheetApp.flush();
+      return {status: "success"};
+    }
+  }
+  return {status: "error", message: "Record matching '" + searchValue + "' not found."};
+}
+
+// ==========================================
+// 3. MEDIA UPLOADS (PHOTOS & VIDEOS FOR ADMIN & CUSTOMERS)
+// ==========================================
+function uploadMediaWithFallback(base64Data, filename, mimeType) {
+  try {
+    if (!base64Data) return {status: "error", message: "No media data provided."};
+    
+    // Clean data URL prefix if present
+    const cleanBase64 = String(base64Data).replace(/^data:[^;]+;base64,/, '');
+    const cleanMime = mimeType || (filename && filename.endsWith(".mp4") ? "video/mp4" : "image/jpeg");
+    const isVideo = cleanMime.startsWith("video/") || (filename && /\.(mp4|webm|mov|mkv)$/i.test(filename));
+    const cleanName = filename || (isVideo ? `video_${Date.now()}.mp4` : `photo_${Date.now()}.jpg`);
+
+    const folderId = PropertiesService.getScriptProperties().getProperty("MEDIA_VAULT_ID");
+    let folder;
+    try {
+      folder = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
+    } catch(e) {
+      folder = DriveApp.getRootFolder();
+    }
+
+    const blob = Utilities.newBlob(Utilities.base64Decode(cleanBase64), cleanMime, cleanName);
+    const file = folder.createFile(blob);
+    try {
+      file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    } catch(e) {}
+    
+    const fileId = file.getId();
+    const mediaType = isVideo ? "video" : "image";
+    const directUrl = isVideo 
+      ? `https://drive.google.com/file/d/${fileId}/preview` 
+      : `https://drive.google.com/uc?export=view&id=${fileId}`;
+
+    return {
+      status: "success", 
+      type: mediaType,
+      fileId: fileId,
+      url: directUrl,
+      downloadUrl: `https://drive.google.com/uc?export=download&id=${fileId}`
+    };
+  } catch (error) {
+    console.warn("Upload to Drive failed, using data URI fallback:", error.message);
+    const safeMime = mimeType || "image/jpeg";
+    const dataUri = base64Data.startsWith("data:") ? base64Data : ("data:" + safeMime + ";base64," + base64Data);
+    return {
+      status: "success", 
+      type: safeMime.startsWith("video/") ? "video" : "image",
+      url: dataUri, 
+      fallback: true
+    };
+  }
+}
+
+// Backward compatibility alias
+function uploadImageWithFallback(base64Data, filename, mimeType) {
+  return uploadMediaWithFallback(base64Data, filename, mimeType);
+}
+
+// ==========================================
+// 4. UTILITIES & VAULTS
+// ==========================================
+function generateVisualCustomerVault(userId, name, email) {
+  const folderId = PropertiesService.getScriptProperties().getProperty("CUSTOMER_BASE_ID");
+  let folder;
+  try {
+    folder = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
+  } catch(e) {
+    folder = DriveApp.getRootFolder();
+  }
+
+  const vaultSheet = SpreadsheetApp.create(userId + "_Customer_Vault");
+  try {
+    if (folder.getId() !== DriveApp.getRootFolder().getId()) {
+      DriveApp.getFileById(vaultSheet.getId()).moveTo(folder);
+    }
+  } catch(e) {
+    console.warn("Could not move customer vault to folder:", e.message);
+  }
+  
+  const sheet = vaultSheet.getActiveSheet();
+  sheet.setName("Profile_And_Orders");
+  sheet.getRange("A1:E2").merge().setValue("OFFICIAL CUSTOMER VAULT").setBackground("#0f172a").setFontColor("#ffffff").setFontSize(16).setHorizontalAlignment("center");
+  sheet.getRange("A4").setValue("Customer ID:").setFontWeight("bold"); sheet.getRange("B4").setValue(userId);
+  sheet.getRange("A5").setValue("Name:").setFontWeight("bold"); sheet.getRange("B5").setValue(name || "Customer");
+  sheet.getRange("A6").setValue("Email:").setFontWeight("bold"); sheet.getRange("B6").setValue(email || "");
+  sheet.getRange("A9:E9").setValues([["Order ID", "Items", "Amount", "Date", "Status"]]).setBackground("#2563eb").setFontColor("#ffffff").setFontWeight("bold");
+  return vaultSheet.getId();
+}
+
+function createSecurityLog(userId, email, device, action) {
+  try {
+    const folderId = PropertiesService.getScriptProperties().getProperty("SECURITY_LOGS_ID");
+    let folder;
+    try {
+      folder = folderId ? DriveApp.getFolderById(folderId) : DriveApp.getRootFolder();
+    } catch(e) {
+      folder = DriveApp.getRootFolder();
+    }
+
+    const logName = (userId || "System") + "_Security_Log";
+    let files = folder.getFilesByName(logName);
+    const isNew = !files.hasNext();
+    let doc = isNew ? DocumentApp.create(logName) : DocumentApp.openById(files.next().getId());
+    
+    if (isNew && folder.getId() !== DriveApp.getRootFolder().getId()) {
+      try {
+        DriveApp.getFileById(doc.getId()).moveTo(folder);
+      } catch(moveErr) {}
+    }
+    
+    doc.getBody().appendParagraph(`[${new Date().toLocaleString()}] Action: ${action} | Device: ${device || "Browser"} | User: ${email || "Anonymous"}`);
+  } catch(e) {
+    console.warn("createSecurityLog failed gracefully:", e.message);
+  }
+}
+// ==========================================
+// 1. AUTHENTICATION & USER ONBOARDING (WITH PERSONALIZATION)
+// ==========================================
+function findRowIndexByEmailCaseInsensitive(email, sheet) {
+  if (!email || !sheet) return -1;
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return -1;
+  
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const emailColIdx = headers.findIndex(h => String(h).toLowerCase() === "email");
+  if (emailColIdx === -1) return -1;
+
+  const emailColValues = sheet.getRange(1, emailColIdx + 1, lastRow, 1).getValues();
+  const searchEmail = String(email).toLowerCase().trim();
+
+  for (let i = 1; i < emailColValues.length; i++) {
+    if (String(emailColValues[i][0]).toLowerCase().trim() === searchEmail) {
+      return i + 1; // 1-indexed row number in Google Sheets
+    }
+  }
+  return -1;
+}
+
+function requestRegisterOTP(name, email, phone, userType) {
+  if (!email || !String(email).includes("@")) {
+    return {status: "error", message: "A valid email address is required."};
+  }
+  if (!name || String(name).trim().length < 2) {
+    return {status: "error", message: "Full Name is required (minimum 2 characters)."};
+  }
+
+  const cleanName = String(name).trim();
+  const cleanEmail = String(email).toLowerCase().trim();
+  const cleanPhone = phone ? String(phone).trim() : "";
+  const cleanUserType = userType ? String(userType).trim() : "Retail Customer";
+
+  const sheet = getMasterDB().getSheetByName("Users");
+  if (!sheet) {
+    return {status: "error", message: "Users database sheet is not available. Please run setupEcosystem()."};
+  }
+
+  const existingRow = findRowIndexByEmailCaseInsensitive(cleanEmail, sheet);
+  if (existingRow > 0) {
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const statusIdx = headers.findIndex(h => String(h).toLowerCase() === "status");
+    const existingStatus = statusIdx > -1 ? sheet.getRange(existingRow, statusIdx + 1).getValue() : "";
+    
+    if (existingStatus === "Active") {
+      return {status: "error", message: "An active account with this email already exists. Please log in directly."};
+    }
+  }
+
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  
+  if (existingRow > 0) {
+    // Update existing pending record
+    let nameIdx = headers.findIndex(h => String(h).toLowerCase() === "name");
+    let phoneIdx = headers.findIndex(h => String(h).toLowerCase() === "phone");
+    let typeIdx = headers.findIndex(h => String(h).toLowerCase() === "usertype");
+    let otpIdx = headers.findIndex(h => String(h).toLowerCase() === "otp");
+    
+    if (nameIdx > -1) sheet.getRange(existingRow, nameIdx + 1).setValue(cleanName);
+    if (phoneIdx > -1) sheet.getRange(existingRow, phoneIdx + 1).setValue(cleanPhone);
+    if (typeIdx > -1) sheet.getRange(existingRow, typeIdx + 1).setValue(cleanUserType);
+    if (otpIdx > -1) sheet.getRange(existingRow, otpIdx + 1).setValue(otp);
+  } else {
+    // Create new user row with UserType personalization
+    let newRow = new Array(headers.length).fill("");
+    headers.forEach((h, i) => {
+      let lower = String(h).toLowerCase().trim();
+      if (lower === "name") newRow[i] = cleanName;
+      else if (lower === "email") newRow[i] = cleanEmail;
+      else if (lower === "phone") newRow[i] = cleanPhone;
+      else if (lower === "usertype") newRow[i] = cleanUserType;
+      else if (lower === "otp") newRow[i] = otp;
+      else if (lower === "status") newRow[i] = "Pending_OTP";
+      else if (lower === "visits") newRow[i] = 0;
+      else if (lower === "updatecount") newRow[i] = 0;
+    });
+    sheet.appendRow(newRow);
+  }
+  
+  SpreadsheetApp.flush();
+  sendOTPEmail(cleanEmail, otp, "Registration");
+  return {status: "success", message: `Verification OTP has been dispatched to ${cleanEmail}.`};
+}
+
+function verifyRegisterOTP(email, otp, deviceInfo) {
+  if (!email || !otp) {
+    return {status: "error", message: "Email and OTP are strictly required."};
+  }
+
+  const cleanOTP = String(otp).trim();
+  if (!cleanOTP) {
+    return {status: "error", message: "OTP code cannot be blank."};
+  }
+
+  const sheet = getMasterDB().getSheetByName("Users");
+  const rowIndex = findRowIndexByEmailCaseInsensitive(email, sheet);
+
+  if (rowIndex > 0) {
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const sData = sheet.getRange(rowIndex, 1, 1, sheet.getLastColumn()).getValues()[0];
+    
+    let otpIndex = headers.findIndex(h => String(h).toLowerCase() === "otp");
+    let nameIndex = headers.findIndex(h => String(h).toLowerCase() === "name");
+    let phoneIndex = headers.findIndex(h => String(h).toLowerCase() === "phone");
+    let typeIndex = headers.findIndex(h => String(h).toLowerCase() === "usertype");
+    let statusIndex = headers.findIndex(h => String(h).toLowerCase() === "status");
+    let userIdIndex = headers.findIndex(h => String(h).toLowerCase() === "userid");
+    let vaultIndex = headers.findIndex(h => String(h).toLowerCase() === "vaultid");
+    let addressFileIndex = headers.findIndex(h => String(h).toLowerCase() === "addressfileid");
+    let deviceIndex = headers.findIndex(h => String(h).toLowerCase() === "device");
+    let visitsIndex = headers.findIndex(h => String(h).toLowerCase() === "visits");
+
+    let storedOTP = otpIndex > -1 && sData[otpIndex] ? String(sData[otpIndex]).trim() : "";
+
+    if (storedOTP && storedOTP === cleanOTP) {
+      const name = nameIndex > -1 ? sData[nameIndex] : "Customer";
+      const phone = phoneIndex > -1 ? sData[phoneIndex] : "";
+      const userType = typeIndex > -1 && sData[typeIndex] ? sData[typeIndex] : "Retail Customer";
+      const userId = "AN-" + Math.floor(10000 + Math.random() * 90000);
+
+      // Create Customer Vault
+      const vaultId = generateVisualCustomerVault(userId, name, email);
+      
+      // Create Dedicated Address File
+      let addrFolderId = PropertiesService.getScriptProperties().getProperty("ADDRESS_VAULT_ID");
+      let addrFolder;
+      try {
+        addrFolder = addrFolderId ? DriveApp.getFolderById(addrFolderId) : DriveApp.getRootFolder();
+      } catch(e) {
+        addrFolder = DriveApp.getRootFolder();
+      }
+      
+      const addrSheet = SpreadsheetApp.create(userId + "_Address_Book");
+      try {
+        if (addrFolder.getId() !== DriveApp.getRootFolder().getId()) {
+          DriveApp.getFileById(addrSheet.getId()).moveTo(addrFolder);
+        }
+      } catch(e) {}
+      
+      const firstSheet = addrSheet.getActiveSheet();
+      firstSheet.setName("Saved_Addresses");
+      firstSheet.appendRow(["Address_Line_1", "Address_Line_2", "City", "State", "Pincode"]);
+
+      // Update User Row
+      if (statusIndex > -1) sheet.getRange(rowIndex, statusIndex + 1).setValue("Active");
+      if (otpIndex > -1) sheet.getRange(rowIndex, otpIndex + 1).clearContent();
+      if (userIdIndex > -1) sheet.getRange(rowIndex, userIdIndex + 1).setValue(userId);
+      if (vaultIndex > -1) sheet.getRange(rowIndex, vaultIndex + 1).setValue(vaultId);
+      if (addressFileIndex > -1) sheet.getRange(rowIndex, addressFileIndex + 1).setValue(addrSheet.getId());
+      if (deviceIndex > -1) sheet.getRange(rowIndex, deviceIndex + 1).setValue(deviceInfo || "Web Browser");
+      if (visitsIndex > -1) sheet.getRange(rowIndex, visitsIndex + 1).setValue(1);
+
+      SpreadsheetApp.flush();
+      sendRegistrationPDF(email, name, phone, userId);
+      createSecurityLog(userId, email, deviceInfo, "Account Registration & Vault Created");
+
+      return {
+        status: "success", 
+        userId: userId, 
+        name: name, 
+        email: email, 
+        phone: phone,
+        userType: userType,
+        message: "Account verified successfully!"
+      };
+    }
+  }
+  return {status: "error", message: "Invalid or expired verification code."};
+}
+
+function requestLoginOTP(email) {
+  if (!email || !String(email).includes("@")) {
+    return {status: "error", message: "A valid email address is required."};
+  }
+
+  const cleanEmail = String(email).toLowerCase().trim();
+  const sheet = getMasterDB().getSheetByName("Users");
+  const rowIndex = findRowIndexByEmailCaseInsensitive(cleanEmail, sheet);
+
+  if (rowIndex > 0) {
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    let otpIndex = headers.findIndex(h => String(h).toLowerCase() === "otp");
+    let statusIndex = headers.findIndex(h => String(h).toLowerCase() === "status");
+    
+    if (statusIndex > -1) {
+      let statusVal = sheet.getRange(rowIndex, statusIndex + 1).getValue();
+      if (statusVal === "Banned" || statusVal === "Suspended") {
+        return {status: "error", message: "This account has been restricted. Please contact support."};
+      }
+    }
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    if (otpIndex > -1) {
+      sheet.getRange(rowIndex, otpIndex + 1).setValue(otp);
+      SpreadsheetApp.flush();
+      sendOTPEmail(cleanEmail, otp, "Login");
+      return {status: "success", message: "Login verification code sent to your email."};
+    }
+  }
+  return {status: "error", message: "No registered account found with this email. Please register first."};
+}
+
+function verifyLoginOTP(email, otp, deviceInfo) {
+  if (!email || !otp) {
+    return {status: "error", message: "Email and OTP are required."};
+  }
+
+  const cleanOTP = String(otp).trim();
+  if (!cleanOTP) {
+    return {status: "error", message: "OTP code cannot be blank."};
+  }
+
+  const sheet = getMasterDB().getSheetByName("Users");
+  const rowIndex = findRowIndexByEmailCaseInsensitive(email, sheet);
+
+  if (rowIndex > 0) {
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const sData = sheet.getRange(rowIndex, 1, 1, sheet.getLastColumn()).getValues()[0];
+    
+    let otpIndex = headers.findIndex(h => String(h).toLowerCase() === "otp");
+    let nameIndex = headers.findIndex(h => String(h).toLowerCase() === "name");
+    let phoneIndex = headers.findIndex(h => String(h).toLowerCase() === "phone");
+    let typeIndex = headers.findIndex(h => String(h).toLowerCase() === "usertype");
+    let userIdIndex = headers.findIndex(h => String(h).toLowerCase() === "userid");
+    let visitsIndex = headers.findIndex(h => String(h).toLowerCase() === "visits");
+    let deviceIndex = headers.findIndex(h => String(h).toLowerCase() === "device");
+    let statusIndex = headers.findIndex(h => String(h).toLowerCase() === "status");
+
+    let storedOTP = otpIndex > -1 && sData[otpIndex] ? String(sData[otpIndex]).trim() : "";
+
+    if (storedOTP && storedOTP === cleanOTP) {
+      let currentVisits = Number(visitsIndex > -1 ? (sData[visitsIndex] || 0) : 0) + 1;
+      let prevDevice = deviceIndex > -1 ? String(sData[deviceIndex] || "") : "";
+      let newDevice = deviceInfo || "Web Browser";
+
+      // Clear the single-use OTP
+      if (otpIndex > -1) sheet.getRange(rowIndex, otpIndex + 1).clearContent();
+      if (visitsIndex > -1) sheet.getRange(rowIndex, visitsIndex + 1).setValue(currentVisits);
+      if (deviceIndex > -1) sheet.getRange(rowIndex, deviceIndex + 1).setValue(newDevice);
+      if (statusIndex > -1) sheet.getRange(rowIndex, statusIndex + 1).setValue("Active");
+
+      SpreadsheetApp.flush();
+
+      // Device mismatch alert
+      if (prevDevice && prevDevice !== newDevice) {
+        try {
+          sendDeviceAlert(email, newDevice, currentVisits);
+          let userId = userIdIndex > -1 ? sData[userIdIndex] : "Unknown";
+          createSecurityLog(userId, email, newDevice, "Login with New Device Detected");
+        } catch(e) {
+          console.warn("Could not dispatch device alert:", e.message);
+        }
+      }
+
+      const savedAddresses = readAddressBookForEmail(email);
+      return {
+        status: "success", 
+        userId: userIdIndex > -1 ? sData[userIdIndex] : "",
+        name: nameIndex > -1 ? sData[nameIndex] : "Customer",
+        email: email,
+        phone: phoneIndex > -1 ? sData[phoneIndex] : "",
+        userType: typeIndex > -1 && sData[typeIndex] ? sData[typeIndex] : "Retail Customer",
+        addresses: savedAddresses,
+        Addresses_JSON: JSON.stringify(savedAddresses),
+        message: "Login successful!"
+      };
+    }
+  }
+  return {status: "error", message: "Invalid or expired verification code."};
+}
+
+
+function parseAddressList(raw) {
+  if (!raw) return [];
+  let list = raw;
+  if (typeof raw === "string") {
+    try { list = JSON.parse(raw); } catch (e) { return []; }
+  }
+  if (!Array.isArray(list)) return [];
+  return list.map(function(row) {
+    const rec = row || {};
+    return {
+      l1: String(rec.l1 || rec.Address_Line_1 || rec.line1 || ""),
+      l2: String(rec.l2 || rec.Address_Line_2 || rec.line2 || ""),
+      city: String(rec.city || rec.City || ""),
+      state: String(rec.state || rec.State || ""),
+      pin: String(rec.pin || rec.pincode || rec.Pincode || "")
+    };
+  }).filter(function(row) {
+    return row.l1 || row.city || row.pin;
+  });
+}
+
+function readAddressBookForEmail(email) {
+  if (!email) return [];
+  try {
+    const sheet = getMasterDB().getSheetByName("Users");
+    const rowIndex = findRowIndexByEmailCaseInsensitive(email, sheet);
+    if (rowIndex < 1) return [];
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const fileIdIndex = headers.findIndex(function(h) { return String(h).toLowerCase() === "addressfileid"; });
+    if (fileIdIndex < 0) return [];
+    const fileId = sheet.getRange(rowIndex, fileIdIndex + 1).getValue();
+    if (!fileId) return [];
+    const addrSheet = SpreadsheetApp.openById(fileId).getSheetByName("Saved_Addresses");
+    if (!addrSheet || addrSheet.getLastRow() <= 1) return [];
+    const aData = addrSheet.getRange(1, 1, addrSheet.getLastRow(), 5).getValues();
+    const aArr = [];
+    for (let r = 1; r < aData.length; r++) {
+      const row = {
+        l1: String(aData[r][0] || ""),
+        l2: String(aData[r][1] || ""),
+        city: String(aData[r][2] || ""),
+        state: String(aData[r][3] || ""),
+        pin: String(aData[r][4] || "")
+      };
+      if (row.l1 || row.city || row.pin) aArr.push(row);
+    }
+    return aArr;
+  } catch (e) {
+    console.warn("readAddressBookForEmail:", e.message);
+    return [];
+  }
+}
+
+function getOrCreateAddressSheet(email) {
+  const sheet = getMasterDB().getSheetByName("Users");
+  const rowIndex = findRowIndexByEmailCaseInsensitive(email, sheet);
+  if (rowIndex < 1) return null;
+  let headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  let fileIdIndex = headers.findIndex(function(h) { return String(h).toLowerCase() === "addressfileid"; });
+  if (fileIdIndex < 0) {
+    sheet.getRange(1, headers.length + 1).setValue("AddressFileID");
+    headers.push("AddressFileID");
+    fileIdIndex = headers.length - 1;
+    SpreadsheetApp.flush();
+  }
+  let fileId = sheet.getRange(rowIndex, fileIdIndex + 1).getValue();
+  let addrSheet = null;
+  if (fileId) {
+    try {
+      addrSheet = SpreadsheetApp.openById(fileId).getSheetByName("Saved_Addresses");
+    } catch (e) {
+      addrSheet = null;
+    }
+  }
+  if (!addrSheet) {
+    let addrFolderId = PropertiesService.getScriptProperties().getProperty("ADDRESS_VAULT_ID");
+    let addrFolder;
+    try {
+      addrFolder = addrFolderId ? DriveApp.getFolderById(addrFolderId) : DriveApp.getRootFolder();
+    } catch (e) {
+      addrFolder = DriveApp.getRootFolder();
+    }
+    const created = SpreadsheetApp.create("User_Addresses_" + Date.now());
+    try {
+      if (addrFolder.getId() !== DriveApp.getRootFolder().getId()) {
+        DriveApp.getFileById(created.getId()).moveTo(addrFolder);
+      }
+    } catch (e) {}
+    addrSheet = created.getActiveSheet();
+    addrSheet.setName("Saved_Addresses");
+    addrSheet.appendRow(["Address_Line_1", "Address_Line_2", "City", "State", "Pincode"]);
+    sheet.getRange(rowIndex, fileIdIndex + 1).setValue(created.getId());
+    SpreadsheetApp.flush();
+  }
+  return addrSheet;
+}
+
+function getAddressesBook(email) {
+  if (!email) return {status: "error", message: "Email is required."};
+  const addresses = readAddressBookForEmail(email);
+  return {status: "success", addresses: addresses, Addresses_JSON: JSON.stringify(addresses)};
+}
+
+function saveAddressesBook(email, addressesRaw) {
+  if (!email) return {status: "error", message: "Email is required."};
+  const sheet = getMasterDB().getSheetByName("Users");
+  const rowIndex = findRowIndexByEmailCaseInsensitive(email, sheet);
+  if (rowIndex < 1) return {status: "error", message: "User record not found."};
+  const list = parseAddressList(addressesRaw);
+  const addrSheet = getOrCreateAddressSheet(email);
+  if (!addrSheet) return {status: "error", message: "Could not open the address book."};
+  const last = addrSheet.getLastRow();
+  if (last > 1) addrSheet.deleteRows(2, last - 1);
+  list.forEach(function(row) {
+    addrSheet.appendRow([row.l1 || "", row.l2 || "", row.city || "", row.state || "", row.pin || ""]);
+  });
+  SpreadsheetApp.flush();
+  return {status: "success", addresses: list, message: "Addresses saved."};
+}
+
+// ==========================================
+// 2. PROFILE & ADDRESS VAULT
+// ==========================================
+function updateSecureProfile(data) {
+  if (!data || !data.email) return {status: "error", message: "Email is required."};
+  const sheet = getMasterDB().getSheetByName("Users");
+  const rowIndex = findRowIndexByEmailCaseInsensitive(data.email, sheet);
+
+  if (rowIndex > 0) {
+    // Ensure all critical tracking headers exist dynamically
+    let headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const requiredTrackingCols = ["UpdateCount", "Month", "UserID", "VaultID", "AddressFileID", "UserType", "ProfilePic"];
+    let colsAdded = false;
+
+    requiredTrackingCols.forEach(col => {
+      let idx = headers.findIndex(h => String(h).toLowerCase() === col.toLowerCase());
+      if (idx === -1) {
+        sheet.getRange(1, headers.length + 1).setValue(col);
+        headers.push(col);
+        colsAdded = true;
+      }
+    });
+
+    if (colsAdded) {
+      SpreadsheetApp.flush();
+      headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    }
+
+    const currentMonth = new Date().getMonth() + 1;
+    let limitCountIndex = headers.findIndex(h => String(h).toLowerCase() === "updatecount");
+    let limitMonthIndex = headers.findIndex(h => String(h).toLowerCase() === "month");
+    let nameIndex = headers.findIndex(h => String(h).toLowerCase() === "name");
+    let phoneIndex = headers.findIndex(h => String(h).toLowerCase() === "phone");
+    let picIndex = headers.findIndex(h => String(h).toLowerCase() === "profilepic");
+    let typeIndex = headers.findIndex(h => String(h).toLowerCase() === "usertype");
+
+    let recordedMonth = Number(sheet.getRange(rowIndex, limitMonthIndex + 1).getValue() || 0);
+    let count = Number(sheet.getRange(rowIndex, limitCountIndex + 1).getValue() || 0);
+
+    if (recordedMonth !== currentMonth) {
+      count = 0;
+      sheet.getRange(rowIndex, limitMonthIndex + 1).setValue(currentMonth);
+    }
+    
+    // Safety limit: max 5 profile updates per month
+    if (count >= 5) {
+      return {status: "error", message: "Monthly profile update limit reached (maximum 5 updates per calendar month)."};
+    }
+
+    if (data.name && nameIndex > -1) sheet.getRange(rowIndex, nameIndex + 1).setValue(data.name);
+    if (data.phone && phoneIndex > -1) sheet.getRange(rowIndex, phoneIndex + 1).setValue(data.phone);
+    if (data.profilePic && picIndex > -1) sheet.getRange(rowIndex, picIndex + 1).setValue(data.profilePic);
+    if (data.userType && typeIndex > -1) sheet.getRange(rowIndex, typeIndex + 1).setValue(data.userType);
+    
+    sheet.getRange(rowIndex, limitCountIndex + 1).setValue(count + 1);
+
+    // Full address book from the storefront replaces the vault.
+    // A single line still appends for older clients.
+    const addressPayload = data.addresses || data.Addresses_JSON;
+    if (addressPayload) {
+      saveAddressesBook(data.email, addressPayload);
+    } else if (data.addressLine1 || data.pincode) {
+      saveDedicatedAddress(data.email, data.addressLine1, data.addressLine2, data.city, data.state, data.pincode);
+    }
+
+    SpreadsheetApp.flush();
+    return {status: "success", message: "Profile successfully updated."};
+  }
+  return {status: "error", message: "User record not found."};
+}
+
+function saveDedicatedAddress(email, l1, l2, city, state, pin) {
+  const sheet = getMasterDB().getSheetByName("Users");
+  const rowIndex = findRowIndexByEmailCaseInsensitive(email, sheet);
+  if (rowIndex > 0) {
+    const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const fileIdIndex = headers.findIndex(h => String(h).toLowerCase() === "addressfileid");
+    
+    if (fileIdIndex > -1) {
+      let fileId = sheet.getRange(rowIndex, fileIdIndex + 1).getValue();
+      let addrSheet;
+      
+      if (!fileId) {
+        let addrFolderId = PropertiesService.getScriptProperties().getProperty("ADDRESS_VAULT_ID");
+        let addrFolder;
+        try {
+          addrFolder = addrFolderId ? DriveApp.getFolderById(addrFolderId) : DriveApp.getRootFolder();
+        } catch(e) {
+          addrFolder = DriveApp.getRootFolder();
+        }
+        
+        let newAddr = SpreadsheetApp.create("User_Addresses_" + Date.now());
+        try {
+          if (addrFolder.getId() !== DriveApp.getRootFolder().getId()) {
+            DriveApp.getFileById(newAddr.getId()).moveTo(addrFolder);
+          }
+        } catch(e) {}
+        
+        addrSheet = newAddr.getActiveSheet();
+        addrSheet.setName("Saved_Addresses");
+        addrSheet.appendRow(["Address_Line_1", "Address_Line_2", "City", "State", "Pincode"]);
+        sheet.getRange(rowIndex, fileIdIndex + 1).setValue(newAddr.getId());
+      } else {
+        try {
+          addrSheet = SpreadsheetApp.openById(fileId).getSheetByName("Saved_Addresses");
+        } catch(e) {
+          console.warn("Could not open address sheet by ID:", e.message);
+        }
+      }
+      
+      if (addrSheet) {
+        addrSheet.appendRow([l1 || "", l2 || "", city || "", state || "", pin || ""]);
+        SpreadsheetApp.flush();
+      }
+    }
+  }
+}
+// ==========================================
+// 1. NESTED CATEGORY MANAGEMENT (ADMIN & STOREFRONT)
+// ==========================================
+function getCategoriesTree(includeHidden) {
+  const db = getMasterDB();
+  const sheet = db.getSheetByName("Categories");
+  if (!sheet || sheet.getLastRow() <= 1) return [];
+
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(h => String(h).toLowerCase().trim());
+  
+  const idIdx = headers.findIndex(h => h === "categoryid");
+  const nameIdx = headers.findIndex(h => h === "categoryname");
+  const parentIdx = headers.findIndex(h => h === "parentcategoryid");
+  const statusIdx = headers.findIndex(h => h === "status");
+  const dateIdx = headers.findIndex(h => h === "scheduled_live_date");
+
+  const now = new Date();
+  const list = [];
+
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const catId = String(row[idIdx > -1 ? idIdx : 0] || "").trim();
+    const catName = String(row[nameIdx > -1 ? nameIdx : 1] || "").trim();
+    const parentId = parentIdx > -1 ? String(row[parentIdx] || "").trim() : "";
+    const status = statusIdx > -1 ? String(row[statusIdx] || "Active").trim() : "Active";
+    const scheduledDate = dateIdx > -1 && row[dateIdx] ? String(row[dateIdx]).trim() : "";
+
+    if (!catId && !catName) continue;
+
+    const isScheduledFuture = scheduledDate && new Date(scheduledDate) > now;
+    
+    // Customer filter: hide archived/hidden categories and unreleased scheduled ones unless includeHidden is true
+    if (!includeHidden) {
+      if (status === "Hidden" || status === "Archived") continue;
+      if (isScheduledFuture) continue;
+    }
+
+    list.push({
+      id: catId || ("CAT-" + i),
+      name: catName,
+      parentId: parentId || null,
+      status: status,
+      scheduledLiveDate: scheduledDate || null,
+      isScheduled: Boolean(isScheduledFuture)
+    });
+  }
+
+  // Build nested category tree
+  const categoryMap = {};
+  list.forEach(c => { categoryMap[c.id] = { ...c, subcategories: [] }; });
+
+  const rootCategories = [];
+  list.forEach(c => {
+    if (c.parentId && categoryMap[c.parentId]) {
+      categoryMap[c.parentId].subcategories.push(categoryMap[c.id]);
+    } else {
+      rootCategories.push(categoryMap[c.id]);
+    }
+  });
+
+  return rootCategories;
+}
+
+function saveCategory(categoryData) {
+  if (!categoryData || !categoryData.name) {
+    return {status: "error", message: "Category name is required."};
+  }
+
+  const db = getMasterDB();
+  let sheet = db.getSheetByName("Categories");
+  if (!sheet) {
+    sheet = db.insertSheet("Categories");
+    sheet.appendRow(["CategoryID", "CategoryName", "ParentCategoryID", "Status", "Scheduled_Live_Date"]);
+  }
+
+  const catId = categoryData.id || ("CAT-" + Date.now());
+  const catName = String(categoryData.name).trim();
+  const parentId = categoryData.parentId ? String(categoryData.parentId).trim() : "";
+  const status = categoryData.status || "Active"; // Active | Hidden | Archived
+  const scheduledDate = categoryData.scheduledLiveDate || "";
+
+  const data = sheet.getDataRange().getValues();
+  let existingRow = -1;
+
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]).trim() === catId) {
+      existingRow = i + 1;
+      break;
+    }
+  }
+
+  if (existingRow > 0) {
+    sheet.getRange(existingRow, 2).setValue(catName);
+    sheet.getRange(existingRow, 3).setValue(parentId);
+    sheet.getRange(existingRow, 4).setValue(status);
+    sheet.getRange(existingRow, 5).setValue(scheduledDate);
+  } else {
+    sheet.appendRow([catId, catName, parentId, status, scheduledDate]);
+  }
+
+  SpreadsheetApp.flush();
+  return {status: "success", categoryId: catId, message: "Category saved successfully."};
+}
+
+function deleteCategory(categoryId) {
+  if (!categoryId) return {status: "error", message: "Category ID is required."};
+  const sheet = getMasterDB().getSheetByName("Categories");
+  if (!sheet || sheet.getLastRow() <= 1) return {status: "error", message: "No categories exist."};
+
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]).trim() === String(categoryId).trim() || String(data[i][1]).toLowerCase().trim() === String(categoryId).toLowerCase().trim()) {
+      sheet.deleteRow(i + 1);
+      SpreadsheetApp.flush();
+      return {status: "success", message: `Category '${categoryId}' deleted successfully.`};
+    }
+  }
+  return {status: "error", message: "Category not found."};
+}
+
+function toggleCategoryStatus(categoryId, newStatus) {
+  if (!categoryId || !newStatus) return {status: "error", message: "Category ID and status are required."};
+  const sheet = getMasterDB().getSheetByName("Categories");
+  if (!sheet) return {status: "error", message: "Categories sheet not found."};
+
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]).trim() === String(categoryId).trim()) {
+      sheet.getRange(i + 1, 4).setValue(newStatus);
+      SpreadsheetApp.flush();
+      return {status: "success", message: `Category status updated to '${newStatus}'.`};
+    }
+  }
+  return {status: "error", message: "Category not found."};
+}
+
+// ==========================================
+// 2. PRODUCT MANAGEMENT (MEDIA, COD TOGGLE, AUTO-STOCK SCHEDULING)
+// ==========================================
+function getProductsFromSheet(includeScheduled) {
+  const data = getUniversalData("Products");
+  const now = new Date();
+
+  return data.map(obj => {
+    // Process primary Image_URL
+    if (obj.Image_URL) {
+      let urls = String(obj.Image_URL).split(',');
+      let processedUrls = urls.map(u => {
+        let trimmed = u.trim();
+        if (trimmed.includes("drive.google.com") && !trimmed.includes("uc?export=view")) {
+          const fileId = trimmed.match(/[-\w]{25,}/);
+          if (fileId) return `https://drive.google.com/uc?export=view&id=${fileId[0]}`;
+        }
+        return trimmed;
+      });
+      obj.Image_URL = processedUrls.join(',');
+    }
+
+    // Process unlimited Media_URLs array (photos + videos)
+    if (obj.Media_URLs) {
+      try {
+        obj.mediaList = typeof obj.Media_URLs === "string" ? JSON.parse(obj.Media_URLs) : obj.Media_URLs;
+      } catch(e) {
+        obj.mediaList = [];
+      }
+    } else {
+      obj.mediaList = [];
+    }
+
+    // COD availability (default true if unspecified)
+    obj.codAvailable = obj.COD_Available !== undefined && obj.COD_Available !== null 
+      ? (String(obj.COD_Available).toLowerCase() === "true" || obj.COD_Available === true)
+      : true;
+
+    // Auto-Stock Scheduling (Coming Soon)
+    if (obj.Scheduled_Live_Date) {
+      const schedTime = new Date(obj.Scheduled_Live_Date);
+      obj.isComingSoon = schedTime > now;
+      obj.liveDateTimestamp = schedTime.getTime();
+    } else {
+      obj.isComingSoon = false;
+    }
+
+    return obj;
+  }).filter(product => {
+    // If regular customer browsing, include products unless admin marked inactive or hidden
+    if (!includeScheduled && product.Status === "Hidden") return false;
+    return true;
+  });
+}
+
+function saveProduct(productData) {
+  if (!productData || !productData.name) {
+    return {status: "error", message: "Product name is required."};
+  }
+
+  const db = getMasterDB();
+  let sheet = db.getSheetByName("Products");
+  if (!sheet) {
+    sheet = db.insertSheet("Products");
+    sheet.appendRow(["ID", "Name", "Category", "ParentCategory", "Price", "MRP", "Stock", "Image_URL", "Media_URLs", "Description", "Status", "COD_Available", "Scheduled_Live_Date"]);
+  }
+
+  const prodId = productData.id || ("PROD-" + Date.now());
+  const serializedMedia = typeof productData.mediaList === "object" ? JSON.stringify(productData.mediaList || []) : (productData.Media_URLs || "[]");
+  const codAvailable = productData.codAvailable !== false && productData.COD_Available !== false; // boolean
+  const scheduledDate = productData.scheduledLiveDate || productData.Scheduled_Live_Date || "";
+
+  const rowObject = {
+    "ID": prodId,
+    "Name": String(productData.name || "").trim(),
+    "Category": String(productData.category || "General").trim(),
+    "ParentCategory": String(productData.parentCategory || "").trim(),
+    "Price": Number(productData.price || 0),
+    "MRP": Number(productData.mrp || productData.price || 0),
+    "Stock": Number(productData.stock || 0),
+    "Image_URL": String(productData.imageUrl || productData.Image_URL || ""),
+    "Media_URLs": serializedMedia,
+    "Description": String(productData.description || ""),
+    "Status": String(productData.status || "Active"),
+    "COD_Available": codAvailable,
+    "Scheduled_Live_Date": scheduledDate
+  };
+
+  const headers = ensureDynamicColumns(sheet, rowObject);
+  const data = sheet.getDataRange().getValues();
+  const idIdx = headers.findIndex(h => String(h).toLowerCase() === "id");
+
+  let existingRow = -1;
+  if (idIdx > -1) {
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][idIdx]).trim() === prodId) {
+        existingRow = i + 1;
+        break;
+      }
+    }
+  }
+
+  let rowValues = headers.map(h => {
+    let val = rowObject[h];
+    if (typeof val === "object" && val !== null) val = JSON.stringify(val);
+    return val !== undefined ? val : "";
+  });
+
+  if (existingRow > 0) {
+    sheet.getRange(existingRow, 1, 1, headers.length).setValues([rowValues]);
+  } else {
+    sheet.appendRow(rowValues);
+  }
+
+  SpreadsheetApp.flush();
+  return {status: "success", productId: prodId, message: "Product saved successfully with full media and delivery controls."};
+}
+
+function deleteProduct(productId) {
+  if (!productId) return {status: "error", message: "Product ID is required."};
+  const db = getMasterDB();
+  const productSheet = db.getSheetByName("Products");
+  if (!productSheet) return {status: "error", message: "Products sheet not found."};
+  
+  const lastRow = productSheet.getLastRow();
+  if (lastRow <= 1) return {status: "error", message: "No products exist."};
+
+  const data = productSheet.getDataRange().getValues();
+  const headers = data[0];
+  const idIndex = headers.findIndex(h => String(h).toLowerCase() === "id");
+  
+  if (idIndex === -1) return {status: "error", message: "ID column not found in Products sheet."};
+  
+  let deleted = false;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idIndex]).trim() === String(productId).trim()) {
+      productSheet.deleteRow(i + 1);
+      deleted = true;
+      break;
+    }
+  }
+
+  if (!deleted) return {status: "error", message: "Product ID '" + productId + "' not found."};
+
+  // Clean up waitlist and reviews safely in reverse
+  const waitlistSheet = db.getSheetByName("Waitlist");
+  if (waitlistSheet && waitlistSheet.getLastRow() > 1) {
+    const wlData = waitlistSheet.getDataRange().getValues();
+    for (let j = wlData.length - 1; j > 0; j--) {
+      if (String(wlData[j][0]).trim() === String(productId).trim()) {
+        waitlistSheet.deleteRow(j + 1);
+      }
+    }
+  }
+  
+  const reviewSheet = db.getSheetByName("Reviews");
+  if (reviewSheet && reviewSheet.getLastRow() > 1) {
+    const rvData = reviewSheet.getDataRange().getValues();
+    for (let k = rvData.length - 1; k > 0; k--) {
+      if (String(rvData[k][1]).trim() === String(productId).trim()) {
+        reviewSheet.deleteRow(k + 1);
+      }
+    }
+  }
+  
+  SpreadsheetApp.flush();
+  return {status: "success", message: `Product '${productId}' and associated records deleted successfully.`};
+}
+
+// ==========================================
+// 3. PRODUCT REVIEWS WITH MEDIA & ADMIN MODERATION
+// ==========================================
+function addReviewWithMedia(reviewData) {
+  if (!reviewData || !reviewData.productId) {
+    return {status: "error", message: "Product ID is required for review."};
+  }
+
+  const reviewId = "REV-" + Date.now();
+  const serializedMedia = typeof reviewData.mediaUrls === "object" 
+    ? JSON.stringify(reviewData.mediaUrls || []) 
+    : String(reviewData.mediaUrls || "[]");
+
+  // Status defaults to "Approved" for immediate preview, but fully controllable by admin
+  const reviewStatus = reviewData.status || "Approved";
+
+  universalWrite("Reviews", [
+    reviewId,
+    String(reviewData.productId).trim(),
+    String(reviewData.userName || "Verified Buyer").trim(),
+    String(reviewData.userEmail || "").trim(),
+    Number(reviewData.rating || 5),
+    String(reviewData.comment || "").trim(),
+    serializedMedia,
+    new Date().toISOString(),
+    reviewStatus
+  ]);
+
+  return {status: "success", reviewId: reviewId, message: "Review with media submitted successfully!"};
+}
+
+function getApprovedReviews(productId) {
+  const reviews = getUniversalData("Reviews");
+  return reviews.filter(r => {
+    const isApproved = !r.Status || String(r.Status).toLowerCase() === "approved";
+    if (!isApproved) return false;
+    if (productId && String(r.ProductID).trim() !== String(productId).trim()) return false;
+    return true;
+  }).map(r => {
+    try {
+      r.mediaList = typeof r.Media_URLs === "string" ? JSON.parse(r.Media_URLs) : (r.Media_URLs || []);
+    } catch(e) {
+      r.mediaList = [];
+    }
+    return r;
+  });
+}
+
+function getAllReviewsForAdmin() {
+  const reviews = getUniversalData("Reviews");
+  return reviews.map(r => {
+    try {
+      r.mediaList = typeof r.Media_URLs === "string" ? JSON.parse(r.Media_URLs) : (r.Media_URLs || []);
+    } catch(e) {
+      r.mediaList = [];
+    }
+    return r;
+  });
+}
+
+function moderateReview(reviewId, newStatus) {
+  if (!reviewId || !newStatus) return {status: "error", message: "Review ID and new status are required."};
+  const sheet = getMasterDB().getSheetByName("Reviews");
+  if (!sheet || sheet.getLastRow() <= 1) return {status: "error", message: "Reviews sheet not found."};
+
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const idIdx = headers.findIndex(h => String(h).toLowerCase() === "reviewid");
+  const statusIdx = headers.findIndex(h => String(h).toLowerCase() === "status");
+
+  const effectiveIdIdx = idIdx > -1 ? idIdx : 0;
+  const effectiveStatusIdx = statusIdx > -1 ? statusIdx : 8;
+
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][effectiveIdIdx]).trim() === String(reviewId).trim()) {
+      if (newStatus === "Deleted") {
+        sheet.deleteRow(i + 1);
+        SpreadsheetApp.flush();
+        return {status: "success", message: `Review #${reviewId} has been deleted.`};
+      } else {
+        sheet.getRange(i + 1, effectiveStatusIdx + 1).setValue(newStatus);
+        SpreadsheetApp.flush();
+        return {status: "success", message: `Review #${reviewId} status updated to '${newStatus}'.`};
+      }
+    }
+  }
+  return {status: "error", message: "Review not found."};
+}
+
+// ==========================================
+// 4. ORDERS & COMPREHENSIVE ORDER TRACKING ENGINE
+// ==========================================
+
+/**
+ * Enriches a raw order record from the database with parsed items,
+ * computed status stage, timeline, and tracking details.
+ */
+function enrichOrderTrackingDetails(order) {
+  if (!order) return null;
+
+  // 1. Parse items safely
+  let itemsList = [];
+  if (order.Items) {
+    if (typeof order.Items === "string") {
+      try {
+        itemsList = JSON.parse(order.Items);
+      } catch (e) {
+        itemsList = [{ name: String(order.Items), quantity: 1, price: Number(order.Amount || 0) }];
+      }
+    } else if (Array.isArray(order.Items)) {
+      itemsList = order.Items;
+    }
+  }
+
+  // 2. Normalized status
+  const rawStatus = String(order.Status || "Pending").trim();
+  const validStatuses = ["Pending", "Confirmed", "Processing", "Shipped", "Out for Delivery", "Delivered", "Cancelled"];
+  const matchedStatus = validStatuses.find(s => s.toLowerCase() === rawStatus.toLowerCase()) || rawStatus;
+
+  // 3. Computed Status Progression Stages (1 to 5)
+  const statusLevels = {
+    "pending": 1,
+    "confirmed": 2,
+    "processing": 3,
+    "shipped": 4,
+    "out for delivery": 5,
+    "delivered": 6,
+    "cancelled": -1
+  };
+  const currentLevel = statusLevels[matchedStatus.toLowerCase()] || 1;
+
+  const orderDateStr = order.Date ? new Date(order.Date).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : "Order Placed";
+  const estimatedArrival = order.Estimated_Delivery || order.EstimatedDelivery || "Within 3 - 5 business days";
+
+  // Build interactive timeline steps
+  const timeline = [
+    {
+      step: 1,
+      key: "placed",
+      title: "Order Placed",
+      description: "Order received and queued for verification",
+      timestamp: orderDateStr,
+      completed: currentLevel >= 1,
+      current: currentLevel === 1
+    },
+    {
+      step: 2,
+      key: "confirmed",
+      title: "Order Confirmed",
+      description: "Payment & inventory verified",
+      timestamp: currentLevel >= 2 ? "Confirmed" : "Pending",
+      completed: currentLevel >= 2,
+      current: currentLevel === 2
+    },
+    {
+      step: 3,
+      key: "processing",
+      title: "Packed in Warehouse",
+      description: "Products safely packaged and quality checked",
+      timestamp: currentLevel >= 3 ? "Packed" : "Pending",
+      completed: currentLevel >= 3,
+      current: currentLevel === 3
+    },
+    {
+      step: 4,
+      key: "shipped",
+      title: "Dispatched with Courier",
+      description: order.Courier_Name ? `Handed over to ${order.Courier_Name}` : "In transit to fulfillment hub",
+      timestamp: currentLevel >= 4 ? (order.Tracking_Number ? `AWB: ${order.Tracking_Number}` : "In Transit") : "Pending",
+      completed: currentLevel >= 4,
+      current: currentLevel === 4
+    },
+    {
+      step: 5,
+      key: "out_for_delivery",
+      title: "Out for Delivery",
+      description: "Package is on the local courier delivery van",
+      timestamp: currentLevel >= 5 ? "Out for delivery" : "Pending",
+      completed: currentLevel >= 5,
+      current: currentLevel === 5
+    },
+    {
+      step: 6,
+      key: "delivered",
+      title: "Delivered",
+      description: "Package delivered to recipient",
+      timestamp: currentLevel >= 6 ? "Delivered" : `Est. ${estimatedArrival}`,
+      completed: currentLevel >= 6,
+      current: currentLevel === 6
+    }
+  ];
+
+  return {
+    orderId: order.Order_ID || order.OrderID,
+    email: order.Email,
+    amount: Number(order.Amount || 0),
+    paymentMethod: order.Razorpay_ID === "COD" ? "COD" : "RAZORPAY",
+    razorpayId: order.Razorpay_ID || "",
+    status: matchedStatus,
+    date: order.Date || new Date().toISOString(),
+    deliveryAddress: order.Delivery_Address || order.DeliveryAddress || order.address || "Profile Address",
+    courierName: order.Courier_Name || order.CourierName || "",
+    trackingNumber: order.Tracking_Number || order.TrackingNumber || "",
+    estimatedDelivery: estimatedArrival,
+    items: itemsList,
+    timeline: timeline,
+    isCancelled: matchedStatus.toLowerCase() === "cancelled"
+  };
+}
+
+/**
+ * Tracks an order by Order ID (e.g. ORD-172651234), Email, or Tracking / Razorpay ID.
+ * Fixes all previous order tracking bugs.
+ */
+function trackOrder(query) {
+  if (!query) {
+    return { status: "error", message: "Order ID or Email address is required to track an order." };
+  }
+
+  const cleanQuery = String(query).trim().toLowerCase();
+  const allOrders = getUniversalData("Orders");
+  if (!allOrders || allOrders.length === 0) {
+    return { status: "error", message: "No order records found in the store system." };
+  }
+
+  // Filter matching records
+  const matched = allOrders.filter(row => {
+    const rawId = String(row.Order_ID || row.OrderID || "").toLowerCase().trim();
+    const cleanId = rawId.replace(/^ord-/, "");
+    const qClean = cleanQuery.replace(/^ord-/, "");
+
+    const idMatch = rawId === cleanQuery || (cleanId.length > 3 && cleanId === qClean);
+    const emailMatch = String(row.Email || "").toLowerCase().trim() === cleanQuery;
+    const rzpMatch = String(row.Razorpay_ID || row.RazorpayID || "").toLowerCase().trim() === cleanQuery;
+    const awbMatch = String(row.Tracking_Number || row.TrackingNumber || "").toLowerCase().trim() === cleanQuery;
+
+    return idMatch || emailMatch || rzpMatch || awbMatch;
+  });
+
+  if (matched.length === 0) {
+    return {
+      status: "error",
+      message: `Could not locate shipment for reference "${query}". Please verify your Order ID (format: ORD-...) or registered email address.`
+    };
+  }
+
+  const enrichedOrders = matched.map(o => enrichOrderTrackingDetails(o));
+
+  return {
+    status: "success",
+    orders: enrichedOrders,
+    order: enrichedOrders[0]
+  };
+}
+
+function getOrderHistory(email) {
+  if (!email) return [];
+  const result = trackOrder(email);
+  return result.status === "success" ? result.orders : [];
+}
+
+function processOrder(orderData) {
+  if (!orderData || !orderData.email) {
+    return {status: "error", message: "Customer email is required to process order."};
+  }
+  const db = getMasterDB();
+  
+  // Verification for COD: check if COD was requested but disabled for any item
+  if (orderData.razorpayId === "COD") {
+    if (orderData.items) {
+      let itemsList = [];
+      try {
+        itemsList = typeof orderData.items === "string" ? JSON.parse(orderData.items) : orderData.items;
+      } catch(e) {}
+
+      // Cross check against products
+      const allProducts = getProductsFromSheet(true);
+      for (let cartItem of itemsList) {
+        let prod = allProducts.find(p => String(p.ID) === String(cartItem.id));
+        if (prod && prod.codAvailable === false) {
+          return {
+            status: "error", 
+            message: `Cash on Delivery is not available for '${prod.Name}'. Please choose Online Payment via Razorpay.`
+          };
+        }
+      }
+    }
+  }
+
+  // Razorpay Online Payment Verification
+  if (orderData.razorpayId && String(orderData.razorpayId).trim() !== "COD") {
+    try {
+      const rzpKeyId = PropertiesService.getScriptProperties().getProperty("RAZORPAY_KEY_ID") || (typeof RAZORPAY_LIVE_KEY !== "undefined" ? RAZORPAY_LIVE_KEY : "rzp_live_SVstISgPrcivjP");
+      const rzpKeySecret = PropertiesService.getScriptProperties().getProperty("RAZORPAY_KEY_SECRET") || "SFRSwjiLdIxkgO02f6rOF2QP";
+      
+      const auth = Utilities.base64Encode(rzpKeyId + ":" + rzpKeySecret);
+      const rzpOptions = {
+        "method": "get",
+        "headers": { "Authorization": "Basic " + auth },
+        "muteHttpExceptions": true
+      };
+      
+      const response = UrlFetchApp.fetch("https://api.razorpay.com/v1/payments/" + orderData.razorpayId, rzpOptions);
+      const resCode = response.getResponseCode();
+      const rzpData = JSON.parse(response.getContentText());
+      
+      if (resCode !== 200 || (rzpData.status !== "captured" && rzpData.status !== "authorized")) {
+        return {status: "error", message: "Razorpay payment verification failed: " + (rzpData.error ? rzpData.error.description : "Payment not captured.")};
+      }
+    } catch(e) {
+      console.warn("Payment verification exception:", e.message);
+    }
+  }
+
+  const orderId = "ORD-" + Date.now();
+  const orderDate = new Date();
+  
+  let orderSheet = db.getSheetByName("Orders");
+  if (!orderSheet) {
+    orderSheet = db.insertSheet("Orders");
+    orderSheet.appendRow(["Order_ID", "Email", "Items", "Amount", "Razorpay_ID", "Status", "Date", "Delivery_Address", "Courier_Name", "Tracking_Number", "Estimated_Delivery"]);
+  }
+
+  const serializedItems = typeof orderData.items === "object" ? JSON.stringify(orderData.items) : String(orderData.items || "[]");
+  const deliveryAddr = orderData.Delivery_Address || orderData.deliveryAddress || orderData.address || "Default Profile Address";
+
+  let oHeaders = ensureDynamicColumns(orderSheet, orderData);
+  let newRow = new Array(oHeaders.length).fill("");
+
+  let idIdx = oHeaders.indexOf("Order_ID");
+  let emailIdx = oHeaders.indexOf("Email");
+  let itemsIdx = oHeaders.indexOf("Items");
+  let amountIdx = oHeaders.indexOf("Amount");
+  let rzpIdx = oHeaders.indexOf("Razorpay_ID");
+  let statusIdx = oHeaders.indexOf("Status");
+  let dateIdx = oHeaders.indexOf("Date");
+  let addrIdx = oHeaders.indexOf("Delivery_Address");
+  let courierIdx = oHeaders.indexOf("Courier_Name");
+  let trackIdx = oHeaders.indexOf("Tracking_Number");
+  let estIdx = oHeaders.indexOf("Estimated_Delivery");
+
+  if (idIdx > -1) newRow[idIdx] = orderId;
+  if (emailIdx > -1) newRow[emailIdx] = String(orderData.email).toLowerCase().trim();
+  if (itemsIdx > -1) newRow[itemsIdx] = serializedItems;
+  if (amountIdx > -1) newRow[amountIdx] = Number(orderData.amount || 0);
+  if (rzpIdx > -1) newRow[rzpIdx] = orderData.razorpayId || "COD";
+  if (statusIdx > -1) newRow[statusIdx] = "Pending";
+  if (dateIdx > -1) newRow[dateIdx] = orderDate.toISOString();
+  if (addrIdx > -1) newRow[addrIdx] = deliveryAddr;
+  if (courierIdx > -1) newRow[courierIdx] = "";
+  if (trackIdx > -1) newRow[trackIdx] = "";
+  if (estIdx > -1) newRow[estIdx] = "Within 3 - 5 business days";
+  
+  orderSheet.appendRow(newRow);
+  syncCart(orderData.email, "[]");
+
+  // Sync to visual customer vault
+  const usersSheet = db.getSheetByName("Users");
+  if (usersSheet) {
+    const rowIndex = findRowIndexByEmailCaseInsensitive(orderData.email, usersSheet);
+    if (rowIndex > 0) {
+      let uHeaders = usersSheet.getRange(1, 1, 1, usersSheet.getLastColumn()).getValues()[0];
+      let vaultIdx = uHeaders.findIndex(h => String(h).toLowerCase() === "vaultid");
+      if (vaultIdx > -1) {
+        let vaultId = usersSheet.getRange(rowIndex, vaultIdx + 1).getValue();
+        if (vaultId) {
+          try { 
+            SpreadsheetApp.openById(vaultId).getSheetByName("Profile_And_Orders").appendRow([orderId, serializedItems, orderData.amount, orderDate.toLocaleDateString(), "Pending"]); 
+          } catch(e) {} 
+        }
+      }
+    }
+  }
+
+  SpreadsheetApp.flush();
+
+  try {
+    sendOrderReceivedEmail(orderData, orderId);
+  } catch(e) {}
+
+  const rawOrder = {
+    Order_ID: orderId,
+    Email: orderData.email,
+    Items: serializedItems,
+    Amount: orderData.amount,
+    Razorpay_ID: orderData.razorpayId || "COD",
+    Status: "Pending",
+    Date: orderDate.toISOString(),
+    Delivery_Address: deliveryAddr,
+    Courier_Name: "",
+    Tracking_Number: "",
+    Estimated_Delivery: "Within 3 - 5 business days"
+  };
+  const enriched = enrichOrderTrackingDetails(rawOrder);
+
+  return {
+    status: "success", 
+    orderId: orderId, 
+    order: enriched,
+    message: "Order placed successfully."
+  };
+}
+
+function getCart(email) {
+  if (!email) return {status: "success", cart: "[]"};
+  let sheet = getMasterDB().getSheetByName("Carts");
+  if (!sheet || sheet.getLastRow() <= 1) return {status: "success", cart: "[]"};
+  
+  const data = sheet.getDataRange().getValues();
+  const searchEmail = String(email).toLowerCase().trim();
+  
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] && String(data[i][0]).toLowerCase().trim() === searchEmail) {
+      return {status: "success", cart: data[i][1] || "[]"};
+    }
+  }
+  return {status: "success", cart: "[]"};
+}
+
+function syncCart(email, cartItemsJSON) {
+  if (!email) return {status: "error", message: "Email is required to sync cart."};
+  
+  let cleanJSON = cartItemsJSON;
+  if (typeof cleanJSON !== "string") {
+    cleanJSON = JSON.stringify(cleanJSON || []);
+  }
+
+  let sheet = getMasterDB().getSheetByName("Carts");
+  if (!sheet) {
+    sheet = getMasterDB().insertSheet("Carts");
+    sheet.appendRow(["Email", "CartJSON"]);
+  }
+
+  const lastRow = sheet.getLastRow();
+  const searchEmail = String(email).toLowerCase().trim();
+
+  if (lastRow > 1) {
+    const data = sheet.getRange(1, 1, lastRow, 2).getValues();
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][0] && String(data[i][0]).toLowerCase().trim() === searchEmail) {
+        sheet.getRange(i + 1, 2).setValue(cleanJSON);
+        SpreadsheetApp.flush();
+        return {status: "success"};
+      }
+    }
+  }
+
+  sheet.appendRow([searchEmail, cleanJSON]);
+  SpreadsheetApp.flush();
+  return {status: "success"};
+}
+
+function logActivity(email, type, details) {
+  if (!email || type !== "LastSeen") return {status: "success"};
+  const sheet = getMasterDB().getSheetByName("Users");
+  if (!sheet) return {status: "success"};
+
+  const rowIndex = findRowIndexByEmailCaseInsensitive(email, sheet);
+  if (rowIndex > 0) {
+    let headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+    let lastSeenIdx = headers.findIndex(h => String(h).toLowerCase() === "lastseen");
+    
+    if (lastSeenIdx === -1) {
+      sheet.getRange(1, headers.length + 1).setValue("LastSeen");
+      lastSeenIdx = headers.length;
+    }
+    sheet.getRange(rowIndex, lastSeenIdx + 1).setValue(details || new Date().toISOString());
+    SpreadsheetApp.flush();
+  }
+  return {status: "success"};
+}
+
+function addToWaitlist(email, productId) {
+  if (!email || !productId) return {status: "error", message: "Email and Product ID are required."};
+  universalWrite("Waitlist", [String(productId), String(email).toLowerCase().trim(), new Date().toISOString()]);
+  return {status: "success", message: "Added to waitlist."};
+}
+
+function updateOrderStatusAndAlert(orderId, newStatus, courierName, trackingNumber, estDelivery) {
+  if (!orderId || !newStatus) return {status: "error", message: "Order ID and new Status are required."};
+  const sheet = getMasterDB().getSheetByName("Orders");
+  if (!sheet) return {status: "error", message: "Orders sheet not found."};
+
+  // Ensure Courier_Name, Tracking_Number, Estimated_Delivery columns exist
+  let headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const requiredCols = ["Courier_Name", "Tracking_Number", "Estimated_Delivery"];
+  requiredCols.forEach(col => {
+    const found = headers.some(h => String(h).toLowerCase().replace(/_/g, "") === col.toLowerCase().replace(/_/g, ""));
+    if (!found) {
+      sheet.getRange(1, sheet.getLastColumn() + 1).setValue(col);
+      headers.push(col);
+    }
+  });
+
+  const data = sheet.getDataRange().getValues();
+  const orderIdIdx = headers.findIndex(h => String(h).toLowerCase().replace(/_/g, "") === "orderid");
+  const statusIdx = headers.findIndex(h => String(h).toLowerCase() === "status");
+  const emailIdx = headers.findIndex(h => String(h).toLowerCase() === "email");
+  const courierIdx = headers.findIndex(h => String(h).toLowerCase().replace(/_/g, "") === "couriername");
+  const trackingIdx = headers.findIndex(h => String(h).toLowerCase().replace(/_/g, "") === "trackingnumber");
+  const estIdx = headers.findIndex(h => String(h).toLowerCase().replace(/_/g, "") === "estimateddelivery");
+
+  for (let i = 1; i < data.length; i++) {
+    const rowOrderId = String(data[i][orderIdIdx]).trim();
+    if (rowOrderId === String(orderId).trim() || rowOrderId.replace(/^ord-/, "") === String(orderId).trim().replace(/^ord-/, "")) {
+      // 1. Update Status
+      if (statusIdx > -1) sheet.getRange(i + 1, statusIdx + 1).setValue(newStatus);
+
+      // 2. Update Courier info if provided
+      if (courierName && courierIdx > -1) sheet.getRange(i + 1, courierIdx + 1).setValue(courierName);
+      if (trackingNumber && trackingIdx > -1) sheet.getRange(i + 1, trackingIdx + 1).setValue(trackingNumber);
+      if (estDelivery && estIdx > -1) sheet.getRange(i + 1, estIdx + 1).setValue(estDelivery);
+
+      SpreadsheetApp.flush(); 
+
+      const email = emailIdx > -1 ? data[i][emailIdx] : "";
+      const effectiveCourier = courierName || (courierIdx > -1 ? data[i][courierIdx] : "");
+      const effectiveAwb = trackingNumber || (trackingIdx > -1 ? data[i][trackingIdx] : "");
+      const effectiveEst = estDelivery || (estIdx > -1 ? data[i][estIdx] : "");
+
+      // Automated email triggers with SVG icons
+      if (email) {
+        if (String(newStatus).toLowerCase() === "shipped") {
+          try {
+            sendOrderShippedEmail(email, rowOrderId, effectiveCourier, effectiveAwb, effectiveEst);
+          } catch(e) {}
+        } else if (String(newStatus).toLowerCase() === "delivered") {
+          try {
+            sendOrderDeliveredEmail(email, rowOrderId);
+          } catch(e) {}
+        }
+      }
+
+      return {
+        status: "success", 
+        message: `Order #${rowOrderId} updated to '${newStatus}' with tracking info.`,
+        orderId: rowOrderId,
+        newStatus: newStatus
+      };
+    }
+  }
+  return {status: "error", message: `Order #${orderId} not found.`};
+}
+
+function sendBulkPromo(title, message, bannerUrl) {
+  if (!title || !message) return {status: "error", message: "Title and message are required."};
+  const usersSheet = getMasterDB().getSheetByName("Users");
+  if (!usersSheet || usersSheet.getLastRow() <= 1) return {status: "error", message: "No users found."};
+
+  const data = usersSheet.getDataRange().getValues();
+  const emailColIdx = data[0].findIndex(h => String(h).toLowerCase() === "email");
+  const idx = emailColIdx > -1 ? emailColIdx : 1;
+
+  let emailList = [];
+  for (let i = 1; i < data.length; i++) {
+    let val = data[i][idx];
+    if (val && String(val).includes("@")) emailList.push(String(val).trim());
+  }
+
+  emailList = Array.from(new Set(emailList));
+  const BATCH_SIZE = 40;
+  for (let i = 0; i < emailList.length; i += BATCH_SIZE) {
+    const chunk = emailList.slice(i, i + BATCH_SIZE).join(",");
+    try {
+      sendBulkPromoEmail(chunk, title, message, bannerUrl);
+    } catch(e) {}
+  }
+  return {status: "success", message: `Promo sent to ${emailList.length} customers.`};
+}
+
+// ==========================================
+// 8. DYNAMIC BANNER MANAGEMENT ENGINE (ZERO HARDCODING)
+// ==========================================
+function getBannersFromSheet(includeInactive) {
+  const db = getMasterDB();
+  let sheet = db.getSheetByName("Banners");
+  if (!sheet || sheet.getLastRow() <= 1) {
+    return [];
+  }
+
+  const data = sheet.getDataRange().getValues();
+  const rawHeaders = data[0].map(h => String(h).trim());
+  const cleanHeaders = rawHeaders.map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ""));
+  
+  const findCol = function(possibleKeys) {
+    for (var k = 0; k < possibleKeys.length; k++) {
+      var norm = possibleKeys[k].toLowerCase().replace(/[^a-z0-9]/g, "");
+      var idx = cleanHeaders.indexOf(norm);
+      if (idx > -1) return idx;
+    }
+    return -1;
+  };
+
+  const idIdx = findCol(["bannerid", "id", "banner_id"]);
+  const titleIdx = findCol(["title", "name", "bannertitle", "heading"]);
+  const subIdx = findCol(["subtitle", "sub_title", "description", "caption"]);
+  const imgIdx = findCol(["imageurl", "image_url", "image", "photo", "bannerimage", "mediaurl", "url"]);
+  const linkIdx = findCol(["linkurl", "link_url", "link", "targeturl", "target_url"]);
+  const catIdx = findCol(["targetcategory", "category", "target_category"]);
+  const badgeIdx = findCol(["badgetext", "badge", "badge_text", "tag"]);
+  const btnIdx = findCol(["buttontext", "button", "button_text", "cta"]);
+  const seqIdx = findCol(["sequence", "order", "seq", "priority", "index"]);
+  const statusIdx = findCol(["status", "active"]);
+  const dateIdx = findCol(["createdat", "date", "created_at"]);
+
+  const banners = [];
+
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const id = String(row[idIdx > -1 ? idIdx : 0] || "").trim();
+    if (!id) continue;
+
+    const status = statusIdx > -1 ? String(row[statusIdx] || "Active").trim() : "Active";
+    if (!includeInactive && status.toLowerCase() !== "active") continue;
+
+    banners.push({
+      id: id,
+      title: titleIdx > -1 ? String(row[titleIdx] || "") : "",
+      subtitle: subIdx > -1 ? String(row[subIdx] || "") : "",
+      imageUrl: imgIdx > -1 ? String(row[imgIdx] || "") : "",
+      linkUrl: linkIdx > -1 ? String(row[linkIdx] || "") : "",
+      targetCategory: catIdx > -1 ? String(row[catIdx] || "") : "",
+      badgeText: badgeIdx > -1 ? String(row[badgeIdx] || "") : "",
+      buttonText: btnIdx > -1 ? String(row[btnIdx] || "Shop Collection") : "Shop Collection",
+      sequence: seqIdx > -1 ? Number(row[seqIdx] || i) : i,
+      status: status,
+      createdAt: dateIdx > -1 ? String(row[dateIdx] || "") : ""
+    });
+  }
+
+  // Sort by sequence ascending
+  banners.sort((a, b) => a.sequence - b.sequence);
+  return banners;
+}
+
+function saveBanner(bannerData) {
+  if (!bannerData || !bannerData.imageUrl) {
+    return {status: "error", message: "Banner image URL is required."};
+  }
+
+  const db = getMasterDB();
+  let sheet = db.getSheetByName("Banners");
+  if (!sheet) {
+    sheet = db.insertSheet("Banners");
+    sheet.appendRow(["BannerID", "Title", "Subtitle", "ImageURL", "LinkURL", "TargetCategory", "BadgeText", "ButtonText", "Sequence", "Status", "CreatedAt"]);
+  }
+
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(h => String(h).toLowerCase().trim());
+  const idIdx = headers.indexOf("bannerid");
+
+  const bannerId = bannerData.id || ("BAN-" + Date.now());
+  const title = bannerData.title || "";
+  const subtitle = bannerData.subtitle || "";
+  const imageUrl = bannerData.imageUrl;
+  const linkUrl = bannerData.linkUrl || "ALL";
+  const targetCategory = bannerData.targetCategory || "";
+  const badgeText = bannerData.badgeText || "";
+  const buttonText = bannerData.buttonText || "Explore";
+  const sequence = bannerData.sequence ? Number(bannerData.sequence) : (data.length);
+  const status = bannerData.status || "Active";
+  const createdAt = bannerData.createdAt || new Date().toISOString();
+
+  let existingRow = -1;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idIdx > -1 ? idIdx : 0]).trim() === String(bannerId).trim()) {
+      existingRow = i + 1;
+      break;
+    }
+  }
+
+  const rowValues = [bannerId, title, subtitle, imageUrl, linkUrl, targetCategory, badgeText, buttonText, sequence, status, createdAt];
+
+  if (existingRow > -1) {
+    sheet.getRange(existingRow, 1, 1, rowValues.length).setValues([rowValues]);
+    SpreadsheetApp.flush();
+    return {status: "success", message: `Banner '${title || bannerId}' updated successfully!`, bannerId: bannerId};
+  } else {
+    sheet.appendRow(rowValues);
+    SpreadsheetApp.flush();
+    return {status: "success", message: `New banner '${title || bannerId}' added successfully!`, bannerId: bannerId};
+  }
+}
+
+function deleteBanner(bannerId) {
+  if (!bannerId) return {status: "error", message: "Banner ID is required."};
+  const db = getMasterDB();
+  const sheet = db.getSheetByName("Banners");
+  if (!sheet) return {status: "error", message: "Banners sheet not found."};
+
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]).trim() === String(bannerId).trim()) {
+      sheet.deleteRow(i + 1);
+      SpreadsheetApp.flush();
+      return {status: "success", message: `Banner #${bannerId} deleted successfully.`};
+    }
+  }
+  return {status: "error", message: `Banner #${bannerId} not found.`};
+}
+
+function toggleBannerStatus(bannerId, newStatus) {
+  if (!bannerId || !newStatus) return {status: "error", message: "Banner ID and status are required."};
+  const db = getMasterDB();
+  const sheet = db.getSheetByName("Banners");
+  if (!sheet) return {status: "error", message: "Banners sheet not found."};
+
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(h => String(h).toLowerCase().trim());
+  const statusIdx = headers.indexOf("status");
+
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]).trim() === String(bannerId).trim()) {
+      sheet.getRange(i + 1, (statusIdx > -1 ? statusIdx : 9) + 1).setValue(newStatus);
+      SpreadsheetApp.flush();
+      return {status: "success", message: `Banner status updated to ${newStatus}.`};
+    }
+  }
+  return {status: "error", message: "Banner not found."};
+}
+
+function reorderBanners(bannerIds) {
+  if (!bannerIds || !Array.isArray(bannerIds)) return {status: "error", message: "Invalid banner IDs list."};
+  const db = getMasterDB();
+  const sheet = db.getSheetByName("Banners");
+  if (!sheet) return {status: "error", message: "Banners sheet not found."};
+
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(h => String(h).toLowerCase().trim());
+  const seqIdx = headers.indexOf("sequence");
+
+  bannerIds.forEach((id, index) => {
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][0]).trim() === String(id).trim()) {
+        sheet.getRange(i + 1, (seqIdx > -1 ? seqIdx : 8) + 1).setValue(index + 1);
+        break;
+      }
+    }
+  });
+
+  SpreadsheetApp.flush();
+  return {status: "success", message: "Banners reordered successfully."};
+}
+
+// ==========================================
+// 9. DYNAMIC PERSON TYPE (USER TYPE) ENGINE (ZERO HARDCODING)
+// ==========================================
+function getUserTypesFromSheet(includeInactive) {
+  const db = getMasterDB();
+  let sheet = db.getSheetByName("UserTypes");
+  if (!sheet || sheet.getLastRow() <= 1) {
+    return [];
+  }
+
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(h => String(h).toLowerCase().trim());
+
+  const idIdx = headers.indexOf("typeid");
+  const nameIdx = headers.indexOf("typename");
+  const descIdx = headers.indexOf("description");
+  const discIdx = headers.indexOf("discountpercent");
+  const statusIdx = headers.indexOf("status");
+  const dateIdx = headers.indexOf("createdat");
+
+  const list = [];
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const typeId = String(row[idIdx > -1 ? idIdx : 0] || "").trim();
+    const typeName = String(row[nameIdx > -1 ? nameIdx : 1] || "").trim();
+    if (!typeId && !typeName) continue;
+
+    const status = statusIdx > -1 ? String(row[statusIdx] || "Active").trim() : "Active";
+    if (!includeInactive && status !== "Active") continue;
+
+    list.push({
+      id: typeId || ("UT-" + i),
+      name: typeName,
+      description: descIdx > -1 ? String(row[descIdx] || "") : "",
+      discountPercent: discIdx > -1 ? Number(row[discIdx] || 0) : 0,
+      status: status,
+      createdAt: dateIdx > -1 ? String(row[dateIdx] || "") : ""
+    });
+  }
+
+  return list;
+}
+
+function saveUserType(typeData) {
+  if (!typeData || !typeData.name) {
+    return {status: "error", message: "Person/User type name is required."};
+  }
+
+  const db = getMasterDB();
+  let sheet = db.getSheetByName("UserTypes");
+  if (!sheet) {
+    sheet = db.insertSheet("UserTypes");
+    sheet.appendRow(["TypeID", "TypeName", "Description", "DiscountPercent", "Status", "CreatedAt"]);
+  }
+
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(h => String(h).toLowerCase().trim());
+  const idIdx = headers.indexOf("typeid");
+
+  const typeId = typeData.id || ("UT-" + Date.now());
+  const name = String(typeData.name).trim();
+  const description = typeData.description || "";
+  const discountPercent = typeData.discountPercent ? Number(typeData.discountPercent) : 0;
+  const status = typeData.status || "Active";
+  const createdAt = typeData.createdAt || new Date().toISOString();
+
+  let existingRow = -1;
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][idIdx > -1 ? idIdx : 0]).trim() === String(typeId).trim()) {
+      existingRow = i + 1;
+      break;
+    }
+  }
+
+  const rowValues = [typeId, name, description, discountPercent, status, createdAt];
+
+  if (existingRow > -1) {
+    sheet.getRange(existingRow, 1, 1, rowValues.length).setValues([rowValues]);
+    SpreadsheetApp.flush();
+    return {status: "success", message: `User Type '${name}' updated successfully!`, typeId: typeId};
+  } else {
+    sheet.appendRow(rowValues);
+    SpreadsheetApp.flush();
+    return {status: "success", message: `User Type '${name}' created successfully!`, typeId: typeId};
+  }
+}
+
+function deleteUserType(userTypeId) {
+  if (!userTypeId) return {status: "error", message: "User Type ID is required."};
+  const db = getMasterDB();
+  const sheet = db.getSheetByName("UserTypes");
+  if (!sheet) return {status: "error", message: "UserTypes sheet not found."};
+
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]).trim() === String(userTypeId).trim()) {
+      sheet.deleteRow(i + 1);
+      SpreadsheetApp.flush();
+      return {status: "success", message: `User Type #${userTypeId} deleted.`};
+    }
+  }
+  return {status: "error", message: `User Type #${userTypeId} not found.`};
+}
+
+function toggleUserTypeStatus(userTypeId, newStatus) {
+  if (!userTypeId || !newStatus) return {status: "error", message: "User Type ID and status required."};
+  const db = getMasterDB();
+  const sheet = db.getSheetByName("UserTypes");
+  if (!sheet) return {status: "error", message: "UserTypes sheet not found."};
+
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(h => String(h).toLowerCase().trim());
+  const statusIdx = headers.indexOf("status");
+
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]).trim() === String(userTypeId).trim()) {
+      sheet.getRange(i + 1, (statusIdx > -1 ? statusIdx : 4) + 1).setValue(newStatus);
+      SpreadsheetApp.flush();
+      return {status: "success", message: `User Type status updated to ${newStatus}.`};
+    }
+  }
+  return {status: "error", message: "User Type not found."};
+}
+
+// ==========================================
+// 1. MODERN EMAIL TEMPLATE ENGINE (SVG ICONS & INLINED STYLES)
+// ==========================================
+
+/**
+ * Returns clean inline SVG vector markup for email clients.
+ * Zero emojis are used across any transactional email.
+ */
+function getEmailSvgIcon(name, color, size) {
+  const c = color || "#064e3b";
+  const s = size || 20;
+  
+  const icons = {
+    check_circle: `<svg xmlns="http://www.w3.org/2000/svg" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block; vertical-align:middle;"><circle cx="12" cy="12" r="10"></circle><polyline points="9 11 12 14 22 4"></polyline></svg>`,
+    package: `<svg xmlns="http://www.w3.org/2000/svg" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block; vertical-align:middle;"><line x1="16.5" y1="9.4" x2="7.55" y2="4.24"></line><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>`,
+    truck: `<svg xmlns="http://www.w3.org/2000/svg" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block; vertical-align:middle;"><rect x="1" y="3" width="15" height="13"></rect><polygon points="16 8 20 8 23 11 23 16 16 16 16 8"></polygon><circle cx="5.5" cy="18.5" r="2.5"></circle><circle cx="18.5" cy="18.5" r="2.5"></circle></svg>`,
+    shield_check: `<svg xmlns="http://www.w3.org/2000/svg" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block; vertical-align:middle;"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><polyline points="9 12 11 14 15 10"></polyline></svg>`,
+    alert_triangle: `<svg xmlns="http://www.w3.org/2000/svg" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block; vertical-align:middle;"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>`,
+    map_pin: `<svg xmlns="http://www.w3.org/2000/svg" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block; vertical-align:middle;"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>`,
+    credit_card: `<svg xmlns="http://www.w3.org/2000/svg" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block; vertical-align:middle;"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"></rect><line x1="1" y1="10" x2="23" y2="10"></line></svg>`,
+    user: `<svg xmlns="http://www.w3.org/2000/svg" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block; vertical-align:middle;"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>`,
+    leaf: `<svg xmlns="http://www.w3.org/2000/svg" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block; vertical-align:middle;"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10Z"></path><path d="M2 21c0-3 1.85-5.36 5.08-6C9.5 14.52 12 13 13 12"></path></svg>`,
+    star: `<svg xmlns="http://www.w3.org/2000/svg" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block; vertical-align:middle;"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>`
+  };
+
+  return icons[name] || icons.check_circle;
+}
+
+function getEmailLogoUrl() {
+  if (typeof LOGO_URL !== "undefined" && LOGO_URL) return LOGO_URL;
+  return "https://raw.githubusercontent.com/TOOLS-droid724/Logo/ae0efe81ab05d73bf85a3df1e9be516c3ca35f21/34826.png";
+}
+
+/**
+ * Robust HTML Email Builder with fully inlined CSS to avoid Gmail/Yahoo style-stripping.
+ */
+function buildEmailHtml(contentHtml, preheaderText) {
+  const logo = getEmailLogoUrl();
+  const preheader = preheaderText ? `<div style="display:none;font-size:1px;color:#333333;line-height:1px;max-height:0px;max-width:0px;opacity:0;overflow:hidden;">${preheaderText}</div>` : '';
+
+  return `
+    <!DOCTYPE html>
+    <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta http-equiv="X-UA-Compatible" content="IE=edge">
+        <title>Aarambh Naturals</title>
+      </head>
+      <body style="margin:0; padding:0; background-color:#f4f6f8; font-family:'Segoe UI', Roboto, Helvetica, Arial, sans-serif; -webkit-font-smoothing:antialiased;">
+        ${preheader}
+        <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color:#f4f6f8; padding:24px 12px;">
+          <tr>
+            <td align="center">
+              <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="max-width:600px; background-color:#ffffff; border:1px solid #e2e8f0; border-radius:8px; overflow:hidden; box-shadow:0 2px 4px rgba(0,0,0,0.04);">
+                <!-- Header -->
+                <tr>
+                  <td align="center" style="padding:28px 24px 20px; background-color:#ffffff; border-bottom:1px solid #f1f5f9;">
+                    <img src="${logo}" alt="Aarambh Naturals" width="80" style="display:block; border:0; outline:none; max-width:80px; height:auto;">
+                    <div style="font-size:11px; font-weight:700; color:#065f46; letter-spacing:1.5px; text-transform:uppercase; margin-top:10px;">
+                      Pure Herbal & Ayurvedic Care
+                    </div>
+                  </td>
+                </tr>
+
+                <!-- Content Area -->
+                <tr>
+                  <td style="padding:32px 28px; color:#1e293b; font-size:14px; line-height:1.65;">
+                    ${contentHtml}
+                  </td>
+                </tr>
+
+                <!-- Footer -->
+                <tr>
+                  <td align="center" style="padding:24px 20px; background-color:#f8fafc; border-top:1px solid #e2e8f0; font-size:12px; color:#64748b; line-height:1.6;">
+                    <div style="margin-bottom:8px; font-weight:600; color:#334155;">
+                      Aarambh Naturals &bull; Traditional Wellness
+                    </div>
+                    <div>
+                      Official Storefront: <a href="https://aarambhntpl.com" style="color:#065f46; text-decoration:underline;">aarambhntpl.com</a>
+                    </div>
+                    <div style="margin-top:8px; font-size:11px; color:#94a3b8;">
+                      &copy; ${new Date().getFullYear()} Aarambh Naturals. All rights reserved.
+                    </div>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </body>
+    </html>
+  `;
+}
+
+// ==========================================
+// 2. TRANSACTIONAL ORDER EMAILS (WITH ITEMS & TRACKING)
+// ==========================================
+
+/**
+ * Sends comprehensive order confirmation email with SVG icons, itemized table, and tracking link.
+ */
+function sendOrderReceivedEmail(orderData, orderId) {
+  if (!orderData || !orderData.email) return;
+
+  const cleanEmail = String(orderData.email).trim();
+  const deliveryAddress = orderData.Delivery_Address || orderData.deliveryAddress || orderData.address || "Profile Address on File";
+  const formattedAmount = Number(orderData.amount || 0).toLocaleString('en-IN');
+  const paymentMethod = (orderData.razorpayId === "COD" || orderData.paymentMethod === "COD")
+    ? "Cash on Delivery (Pay upon delivery)" 
+    : `Online Payment (Verified - ID: ${orderData.razorpayId || "Captured"})`;
+
+  // Parse items safely
+  let itemsList = [];
+  if (orderData.items) {
+    if (typeof orderData.items === "string") {
+      try {
+        itemsList = JSON.parse(orderData.items);
+      } catch(e) {
+        itemsList = [];
+      }
+    } else if (Array.isArray(orderData.items)) {
+      itemsList = orderData.items;
+    }
+  }
+
+  // Build items rows
+  let itemsHtml = '';
+  if (itemsList.length > 0) {
+    itemsHtml = `
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:16px; border:1px solid #e2e8f0; border-radius:6px; overflow:hidden;">
+        <tr style="background-color:#f8fafc; font-size:12px; font-weight:700; color:#475569; text-transform:uppercase; letter-spacing:0.5px;">
+          <td style="padding:10px 14px; border-bottom:1px solid #e2e8f0;">Product Item</td>
+          <td align="center" style="padding:10px 14px; border-bottom:1px solid #e2e8f0;">Qty</td>
+          <td align="right" style="padding:10px 14px; border-bottom:1px solid #e2e8f0;">Price</td>
+        </tr>
+    `;
+
+    itemsList.forEach((it) => {
+      const prodName = it.product ? it.product.name : (it.name || "Ayurvedic Product");
+      const qty = it.quantity || 1;
+      const unitPrice = it.product ? (it.product.price || 0) : (it.price || 0);
+      const subtotal = Number(unitPrice * qty).toLocaleString('en-IN');
+
+      itemsHtml += `
+        <tr style="font-size:13px; color:#1e293b; border-bottom:1px solid #f1f5f9;">
+          <td style="padding:12px 14px;"><strong>${prodName}</strong></td>
+          <td align="center" style="padding:12px 14px; color:#64748b;">${qty}</td>
+          <td align="right" style="padding:12px 14px; font-weight:600;">₹${subtotal}</td>
+        </tr>
+      `;
+    });
+
+    itemsHtml += `
+        <tr style="background-color:#f8fafc; font-size:14px; font-weight:700; color:#0f172a;">
+          <td colspan="2" style="padding:12px 14px; border-top:1px solid #e2e8f0;">Total Payable</td>
+          <td align="right" style="padding:12px 14px; border-top:1px solid #e2e8f0; color:#065f46;">₹${formattedAmount}</td>
+        </tr>
+      </table>
+    `;
+  }
+
+  const pkgIcon = getEmailSvgIcon("package", "#065f46", 24);
+  const pinIcon = getEmailSvgIcon("map_pin", "#475569", 16);
+  const cardIcon = getEmailSvgIcon("credit_card", "#475569", 16);
+  const checkIcon = getEmailSvgIcon("check_circle", "#059669", 18);
+
+  const trackingUrl = `https://aarambhntpl.com/?track=${encodeURIComponent(orderId)}`;
+
+  const content = `
+    <div style="text-align:center; margin-bottom:24px;">
+      <div style="display:inline-block; padding:12px; background-color:#ecfdf5; border-radius:50%; margin-bottom:12px; border:1px solid #a7f3d0;">
+        ${pkgIcon}
+      </div>
+      <h2 style="margin:0 0 6px; font-size:22px; font-weight:700; color:#0f172a;">Order Confirmation</h2>
+      <p style="margin:0; color:#64748b; font-size:14px;">Your order has been recorded and is currently being processed by our packaging team.</p>
+    </div>
+
+    <!-- Order Metadata Card -->
+    <div style="background-color:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:18px; margin-bottom:24px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:13px; line-height:1.8;">
+        <tr>
+          <td style="color:#64748b; width:130px;">Order Reference:</td>
+          <td style="font-weight:700; color:#0f172a; font-family:monospace; font-size:14px;">#${orderId}</td>
+        </tr>
+        <tr>
+          <td style="color:#64748b;">Order Date:</td>
+          <td style="color:#334155;">${new Date().toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}</td>
+        </tr>
+        <tr>
+          <td style="color:#64748b;">Order Status:</td>
+          <td style="font-weight:600; color:#059669;">
+            ${checkIcon} <span style="vertical-align:middle; margin-left:4px;">Pending Fulfillment</span>
+          </td>
+        </tr>
+        <tr>
+          <td style="color:#64748b;">Payment Method:</td>
+          <td style="color:#334155;">
+            ${cardIcon} <span style="vertical-align:middle; margin-left:4px;">${paymentMethod}</span>
+          </td>
+        </tr>
+        <tr>
+          <td style="color:#64748b; vertical-align:top; padding-top:4px;">Delivery Address:</td>
+          <td style="color:#334155; padding-top:4px;">
+            ${pinIcon} <span style="vertical-align:middle; margin-left:4px;">${deliveryAddress}</span>
+          </td>
+        </tr>
+      </table>
+    </div>
+
+    <!-- Items Section -->
+    <div style="margin-bottom:24px;">
+      <h3 style="margin:0 0 8px; font-size:15px; font-weight:700; color:#0f172a;">Ordered Items</h3>
+      ${itemsHtml}
+    </div>
+
+    <!-- Tracking Call to Action -->
+    <div style="text-align:center; margin:32px 0 16px; padding:20px; background-color:#ecfdf5; border:1px solid #a7f3d0; border-radius:8px;">
+      <div style="font-weight:700; font-size:14px; color:#064e3b; margin-bottom:6px;">
+        Track Your Order in Real-Time
+      </div>
+      <p style="margin:0 0 16px; font-size:12px; color:#047857;">
+        Check packaging status, courier dispatch details, and expected delivery timeline.
+      </p>
+      <a href="${trackingUrl}" style="display:inline-block; padding:12px 28px; background-color:#065f46; color:#ffffff; text-decoration:none; font-weight:700; font-size:13px; border-radius:6px; letter-spacing:0.5px;">
+        Track Order Status
+      </a>
+    </div>
+
+    <p style="font-size:12px; color:#94a3b8; text-align:center; margin-top:20px;">
+      If you have questions regarding this order, reply directly to this email or contact support at support@aarambhntpl.com.
+    </p>
+  `;
+
+  try {
+    MailApp.sendEmail({
+      to: cleanEmail,
+      subject: `Order Confirmation #${orderId} - Aarambh Naturals`,
+      name: "Aarambh Naturals",
+      htmlBody: buildEmailHtml(content, `Your Aarambh Naturals order #${orderId} has been confirmed.`)
+    });
+  } catch(e) {
+    console.warn("sendOrderReceivedEmail error:", e.message);
+  }
+}
+
+/**
+ * Sends delivery confirmation email with SVG delivery truck icon and verification details.
+ */
+function sendOrderDeliveredEmail(email, orderId) {
+  if (!email) return;
+
+  const truckIcon = getEmailSvgIcon("truck", "#065f46", 26);
+  const starIcon = getEmailSvgIcon("star", "#d97706", 16);
+  const reviewUrl = `https://aarambhntpl.com/?track=${encodeURIComponent(orderId)}`;
+
+  const content = `
+    <div style="text-align:center; margin-bottom:24px;">
+      <div style="display:inline-block; padding:14px; background-color:#ecfdf5; border-radius:50%; margin-bottom:12px; border:1px solid #a7f3d0;">
+        ${truckIcon}
+      </div>
+      <h2 style="margin:0 0 6px; font-size:22px; font-weight:700; color:#0f172a;">Package Delivered!</h2>
+      <p style="margin:0; color:#64748b; font-size:14px;">Your package for order <strong style="color:#0f172a; font-family:monospace;">#${orderId}</strong> has been successfully delivered.</p>
+    </div>
+
+    <div style="background-color:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:18px; margin-bottom:24px; text-align:left;">
+      <p style="margin:0 0 8px; font-size:13px; color:#334155;">
+        We hope you enjoy your pure, natural wellness products. Your order has been marked as completed in our records.
+      </p>
+      <p style="margin:0; font-size:13px; color:#334155;">
+        Delivered on: <strong>${new Date().toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}</strong>
+      </p>
+    </div>
+
+    <div style="text-align:center; margin:28px 0; padding:20px; background-color:#fffbeb; border:1px solid #fde68a; border-radius:8px;">
+      <div style="margin-bottom:6px; color:#b45309;">
+        ${starIcon} ${starIcon} ${starIcon} ${starIcon} ${starIcon}
+      </div>
+      <div style="font-weight:700; font-size:14px; color:#92400e; margin-bottom:6px;">
+        How was your experience?
+      </div>
+      <p style="margin:0 0 16px; font-size:12px; color:#b45309;">
+        Share your product review and help others discover the benefits of pure Ayurveda.
+      </p>
+      <a href="${reviewUrl}" style="display:inline-block; padding:12px 24px; background-color:#b45309; color:#ffffff; text-decoration:none; font-weight:700; font-size:13px; border-radius:6px;">
+        Leave a Review
+      </a>
+    </div>
+
+    <p style="font-size:12px; color:#94a3b8; text-align:center;">
+      If you did not receive this delivery, or if your package was damaged in transit, please contact us immediately at support@aarambhntpl.com.
+    </p>
+  `;
+
+  try {
+    MailApp.sendEmail({
+      to: email,
+      subject: `Package Delivered: Order #${orderId} - Aarambh Naturals`,
+      name: "Aarambh Naturals",
+      htmlBody: buildEmailHtml(content, `Order #${orderId} has been successfully delivered.`)
+    });
+  } catch(e) {
+    console.warn("sendOrderDeliveredEmail error:", e.message);
+  }
+}
+
+/**
+ * Sends order shipped notification email with courier name, tracking number, and tracking button.
+ */
+function sendOrderShippedEmail(email, orderId, courierName, trackingNumber, estDelivery) {
+  if (!email) return;
+
+  const truckIcon = getEmailSvgIcon("truck", "#065f46", 26);
+  const courier = courierName || "Express Courier Delivery";
+  const awb = trackingNumber || "Dispatched";
+  const est = estDelivery || "3 - 5 Business Days";
+  const trackingUrl = `https://aarambhntpl.com/?track=${encodeURIComponent(orderId)}`;
+
+  const content = `
+    <div style="text-align:center; margin-bottom:24px;">
+      <div style="display:inline-block; padding:14px; background-color:#ecfdf5; border-radius:50%; margin-bottom:12px; border:1px solid #a7f3d0;">
+        ${truckIcon}
+      </div>
+      <h2 style="margin:0 0 6px; font-size:22px; font-weight:700; color:#0f172a;">Your Order Is On Its Way!</h2>
+      <p style="margin:0; color:#64748b; font-size:14px;">Great news! Order <strong style="color:#0f172a; font-family:monospace;">#${orderId}</strong> has been packed and handed over to our courier partner.</p>
+    </div>
+
+    <div style="background-color:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:18px; margin-bottom:24px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:13px; line-height:1.8;">
+        <tr>
+          <td style="color:#64748b; width:140px;">Courier Partner:</td>
+          <td style="font-weight:700; color:#0f172a;">${courier}</td>
+        </tr>
+        <tr>
+          <td style="color:#64748b;">AWB / Tracking No:</td>
+          <td style="font-weight:700; color:#065f46; font-family:monospace;">${awb}</td>
+        </tr>
+        <tr>
+          <td style="color:#64748b;">Estimated Arrival:</td>
+          <td style="color:#334155; font-weight:600;">${est}</td>
+        </tr>
+        <tr>
+          <td style="color:#64748b;">Dispatched On:</td>
+          <td style="color:#334155;">${new Date().toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}</td>
+        </tr>
+      </table>
+    </div>
+
+    <div style="text-align:center; margin:28px 0; padding:20px; background-color:#ecfdf5; border:1px solid #a7f3d0; border-radius:8px;">
+      <div style="font-weight:700; font-size:14px; color:#064e3b; margin-bottom:6px;">
+        Track Live Delivery Progress
+      </div>
+      <p style="margin:0 0 16px; font-size:12px; color:#047857;">
+        Follow your shipment as it moves from our fulfillment center to your delivery address.
+      </p>
+      <a href="${trackingUrl}" style="display:inline-block; padding:12px 28px; background-color:#065f46; color:#ffffff; text-decoration:none; font-weight:700; font-size:13px; border-radius:6px;">
+        Track Order Status
+      </a>
+    </div>
+
+    <p style="font-size:12px; color:#94a3b8; text-align:center;">
+      If you need to change your delivery instructions, please reach out to us at support@aarambhntpl.com with your Order ID #${orderId}.
+    </p>
+  `;
+
+  try {
+    MailApp.sendEmail({
+      to: email,
+      subject: `Shipment Update: Order #${orderId} Dispatched - Aarambh Naturals`,
+      name: "Aarambh Naturals Delivery",
+      htmlBody: buildEmailHtml(content, `Your Aarambh Naturals package #${orderId} has shipped via ${courier}.`)
+    });
+  } catch(e) {
+    console.warn("sendOrderShippedEmail error:", e.message);
+  }
+}
+
+// ==========================================
+// 3. AUTHENTICATION & SECURITY EMAILS (SVG SHIELD)
+// ==========================================
+
+/**
+ * Sends OTP email with SVG security shield icon and high-contrast verification code box.
+ */
+function sendOTPEmail(email, otp, type) {
+  if (!email || !otp) return;
+  const authType = type || "Verification";
+  const shieldIcon = getEmailSvgIcon("shield_check", "#065f46", 26);
+
+  const content = `
+    <div style="text-align:center; margin-bottom:24px;">
+      <div style="display:inline-block; padding:12px; background-color:#ecfdf5; border-radius:50%; margin-bottom:12px; border:1px solid #a7f3d0;">
+        ${shieldIcon}
+      </div>
+      <h2 style="margin:0 0 6px; font-size:22px; font-weight:700; color:#0f172a;">${authType} Verification</h2>
+      <p style="margin:0; color:#64748b; font-size:14px;">Use the single-use authorization code below to complete your sign-in.</p>
+    </div>
+
+    <div style="text-align:center; margin:28px 0;">
+      <div style="display:inline-block; font-size:34px; font-weight:800; letter-spacing:8px; color:#064e3b; background-color:#f0fdf4; padding:16px 36px; border:1px solid #bbf7d0; border-radius:8px; font-family:monospace;">
+        ${otp}
+      </div>
+    </div>
+
+    <div style="background-color:#f8fafc; border:1px solid #e2e8f0; border-radius:6px; padding:14px; text-align:center; font-size:12px; color:#64748b; line-height:1.6;">
+      <strong>Security Notice:</strong> This code expires in 10 minutes. Aarambh Naturals team members will never ask for your verification code. Do not share it with anyone.
+    </div>
+  `;
+
+  try {
+    MailApp.sendEmail({
+      to: email,
+      subject: `Your Verification Code: ${otp} - Aarambh Naturals`,
+      name: "Aarambh Naturals Security",
+      htmlBody: buildEmailHtml(content, `Your verification code is ${otp}. Valid for 10 minutes.`)
+    });
+  } catch(e) {
+    console.warn("sendOTPEmail error:", e.message);
+  }
+}
+
+/**
+ * Sends security alert email when new login or device is detected.
+ */
+function sendDeviceAlert(email, device, visits) {
+  if (!email) return;
+  const alertIcon = getEmailSvgIcon("alert_triangle", "#dc2626", 26);
+
+  const content = `
+    <div style="text-align:center; margin-bottom:24px;">
+      <div style="display:inline-block; padding:12px; background-color:#fef2f2; border-radius:50%; margin-bottom:12px; border:1px solid #fecaca;">
+        ${alertIcon}
+      </div>
+      <h2 style="margin:0 0 6px; font-size:22px; font-weight:700; color:#991b1b;">New Sign-In Detected</h2>
+      <p style="margin:0; color:#64748b; font-size:14px;">A new login was recorded for your Aarambh Naturals account.</p>
+    </div>
+
+    <div style="background-color:#fff1f2; border:1px solid #fecdd3; border-radius:8px; padding:18px; margin-bottom:24px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:13px; line-height:1.8; color:#9f1239;">
+        <tr>
+          <td style="width:130px; font-weight:600;">Device Browser:</td>
+          <td>${device || "Web Browser"}</td>
+        </tr>
+        <tr>
+          <td style="font-weight:600;">Total Logins:</td>
+          <td>${visits || 1}</td>
+        </tr>
+        <tr>
+          <td style="font-weight:600;">Timestamp:</td>
+          <td>${new Date().toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}</td>
+        </tr>
+      </table>
+    </div>
+
+    <p style="font-size:13px; color:#475569; line-height:1.6;">
+      If you performed this action, no further steps are required. If you did not recognize this login, please reply immediately to this email or update your contact credentials.
+    </p>
+  `;
+
+  try {
+    MailApp.sendEmail({
+      to: email,
+      subject: "Security Notification: New Account Login - Aarambh Naturals",
+      name: "Aarambh Naturals Security",
+      htmlBody: buildEmailHtml(content, "A new sign-in was detected on your account.")
+    });
+  } catch(e) {
+    console.warn("sendDeviceAlert error:", e.message);
+  }
+}
+
+/**
+ * Sends registration PDF or rich HTML welcome confirmation with SVG user badge.
+ */
+function sendRegistrationPDF(email, name, phone, userId) {
+  if (!email) return;
+  const cleanPhone = phone ? String(phone).trim() : "";
+  const maskedPhone = cleanPhone.length > 4 ? "XXXXXX" + cleanPhone.slice(-4) : (cleanPhone || "Not provided");
+  const userIcon = getEmailSvgIcon("user", "#065f46", 26);
+
+  const welcomeContent = `
+    <div style="text-align:center; margin-bottom:24px;">
+      <div style="display:inline-block; padding:12px; background-color:#ecfdf5; border-radius:50%; margin-bottom:12px; border:1px solid #a7f3d0;">
+        ${userIcon}
+      </div>
+      <h2 style="margin:0 0 6px; font-size:22px; font-weight:700; color:#0f172a;">Welcome to Aarambh Naturals!</h2>
+      <p style="margin:0; color:#64748b; font-size:14px;">Your official customer account has been verified and registered.</p>
+    </div>
+
+    <div style="background-color:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; padding:18px; margin-bottom:24px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:13px; line-height:1.8;">
+        <tr>
+          <td style="color:#64748b; width:130px;">Account Holder:</td>
+          <td style="font-weight:700; color:#0f172a;">${name || "Customer"}</td>
+        </tr>
+        <tr>
+          <td style="color:#64748b;">Customer ID:</td>
+          <td style="font-weight:700; color:#065f46; font-family:monospace;">${userId || "AN-USER"}</td>
+        </tr>
+        <tr>
+          <td style="color:#64748b;">Registered Email:</td>
+          <td style="color:#334155;">${email}</td>
+        </tr>
+        <tr>
+          <td style="color:#64748b;">Contact Mobile:</td>
+          <td style="color:#334155;">${maskedPhone}</td>
+        </tr>
+      </table>
+    </div>
+
+    <p style="font-size:13px; color:#475569; line-height:1.6; text-align:center;">
+      You can now log in anytime to enjoy authentic herbal extracts, track your orders, and access personal wellness recommendations.
+    </p>
+
+    <div style="text-align:center; margin-top:24px;">
+      <a href="https://aarambhntpl.com" style="display:inline-block; padding:12px 28px; background-color:#065f46; color:#ffffff; text-decoration:none; font-weight:700; font-size:13px; border-radius:6px;">
+        Explore Collections
+      </a>
+    </div>
+  `;
+
+  // PDF Generator
+  const pdfHtml = `
+    <div style="font-family:'Helvetica Neue', Helvetica, Arial, sans-serif; padding:40px; text-align:center; color:#1e293b;">
+      <h1 style="color:#064e3b; margin-bottom:4px;">Aarambh Naturals</h1>
+      <h3 style="color:#64748b; font-weight:normal; margin-top:0;">Official Customer Registration Certificate</h3>
+      <hr style="border:0; border-top:1px solid #e2e8f0; margin:24px 0;">
+      <div style="text-align:left; max-width:400px; margin:0 auto; font-size:14px; line-height:2.2;">
+        <p style="margin:0;"><strong>Customer Name:</strong> ${name || "Customer"}</p>
+        <p style="margin:0;"><strong>Account Email:</strong> ${email}</p>
+        <p style="margin:0;"><strong>Mobile:</strong> ${maskedPhone}</p>
+        <p style="margin:0;"><strong>Customer Identifier:</strong> ${userId || "AN-USER"}</p>
+        <p style="margin:0;"><strong>Activation Date:</strong> ${new Date().toLocaleDateString()}</p>
+      </div>
+      <hr style="border:0; border-top:1px solid #e2e8f0; margin:24px 0;">
+      <p style="font-size:11px; color:#94a3b8;">Please keep this certificate for your personal wellness account records.</p>
+    </div>
+  `;
+
+  try {
+    const blob = Utilities.newBlob(pdfHtml, "text/html").getAs("application/pdf").setName("Aarambh_Naturals_Registration.pdf");
+    MailApp.sendEmail({
+      to: email,
+      subject: "Welcome to Aarambh Naturals - Account Activated",
+      name: "Aarambh Naturals",
+      htmlBody: buildEmailHtml(welcomeContent, `Welcome ${name || ""}, your account has been activated.`),
+      attachments: [blob]
+    });
+  } catch(err) {
+    console.warn("Could not attach PDF, sending plain HTML welcome email instead:", err.message);
+    MailApp.sendEmail({
+      to: email,
+      subject: "Welcome to Aarambh Naturals - Account Activated",
+      name: "Aarambh Naturals",
+      htmlBody: buildEmailHtml(welcomeContent, `Welcome ${name || ""}, your account has been activated.`)
+    });
+  }
+}
+
+/**
+ * Sends admin reply to customer inquiry with SVG leaf brand icon.
+ */
+function sendAdminReply(email, replyText) {
+  if (!email) return {status: "error", message: "Email is required"};
+  const leafIcon = getEmailSvgIcon("leaf", "#065f46", 24);
+
+  const content = `
+    <div style="margin-bottom:20px;">
+      <div style="display:inline-block; vertical-align:middle; margin-right:8px;">
+        ${leafIcon}
+      </div>
+      <h2 style="display:inline-block; vertical-align:middle; margin:0; font-size:20px; font-weight:700; color:#0f172a;">Customer Support Update</h2>
+    </div>
+
+    <div style="background-color:#f8fafc; border-left:4px solid #065f46; padding:16px 20px; margin-bottom:24px; font-size:14px; line-height:1.7; color:#1e293b; white-space:pre-line;">
+      ${replyText}
+    </div>
+
+    <p style="font-size:13px; color:#64748b;">
+      Warm regards,<br>
+      <strong>Aarambh Naturals Care Team</strong><br>
+      <span style="font-size:11px; color:#94a3b8;">support@aarambhntpl.com</span>
+    </p>
+  `;
+
+  try {
+    MailApp.sendEmail({
+      to: email,
+      subject: "Response from Aarambh Naturals Care Team",
+      name: "Aarambh Naturals Support",
+      htmlBody: buildEmailHtml(content, "New message from Aarambh Naturals Care Team.")
+    });
+    return {status: "success"};
+  } catch(e) {
+    return {status: "error", message: e.message};
+  }
+}
+
+/**
+ * Sends bulk promotional announcement with zero emojis and responsive layout.
+ */
+function sendBulkPromoEmail(emailsBCC, title, message, bannerUrl) {
+  if (!emailsBCC) return;
+  const bccString = Array.isArray(emailsBCC) ? emailsBCC.join(",") : String(emailsBCC);
+  if (!bccString.trim()) return;
+
+  const bannerHtml = bannerUrl ? `
+    <div style="margin-bottom:20px; text-align:center;">
+      <img src="${bannerUrl}" alt="${title}" style="width:100%; max-width:540px; height:auto; border-radius:6px; display:block; margin:0 auto; border:1px solid #e2e8f0;">
+    </div>
+  ` : "";
+
+  const content = `
+    ${bannerHtml}
+    <h2 style="margin:0 0 12px; font-size:22px; font-weight:700; color:#0f172a;">${title}</h2>
+    <p style="font-size:14px; color:#475569; line-height:1.7; margin-bottom:24px; white-space:pre-line;">
+      ${message}
+    </p>
+    <div style="text-align:center; margin-top:28px;">
+      <a href="https://aarambhntpl.com" style="display:inline-block; padding:12px 30px; background-color:#065f46; color:#ffffff; text-decoration:none; font-weight:700; font-size:13px; border-radius:6px;">
+        Shop the Collection
+      </a>
+    </div>
+  `;
+
+  let senderEmail = "";
+  try {
+    senderEmail = Session.getActiveUser().getEmail();
+  } catch(e) {}
+
+  try {
+    MailApp.sendEmail({
+      to: senderEmail || "notifications@aarambhntpl.com",
+      bcc: bccString,
+      subject: `Special Update: ${title}`,
+      name: "Aarambh Naturals",
+      htmlBody: buildEmailHtml(content, title)
+    });
+  } catch(e) {
+    console.warn("sendBulkPromoEmail error:", e.message);
+  }
+}
